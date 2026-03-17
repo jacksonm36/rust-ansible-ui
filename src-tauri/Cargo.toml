@@ -1,0 +1,48 @@
+[package]
+name = "ansible-control-panel"
+version = "0.1.0"
+description = "Ansible Control Panel - Tauri + Rust"
+authors = ["vibe-coded"]
+edition = "2021"
+rust-version = "1.70"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", optional = true , features = [] }
+tauri-plugin-shell = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = { version = "0.7", features = ["json", "macros", "tokio"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors", "limit"] }
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+aes-gcm = "0.10"
+aead = "0.5"
+base64 = "0.21"
+rand = "0.8"
+regex = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+cron = "0.12"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+lazy_static = "1"
+walkdir = "2"
+
+[[bin]]
+name = "ansible-server"
+path = "src/server_main.rs"
+
+[features]
+default = ["tauri-app"]
+# Tauri desktop app (needs icons in src-tauri/icons/).
+tauri-app = ["tauri", "tauri-plugin-shell", "custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Server-only: no Tauri, no icons. Use: cargo build --bin ansible-server --no-default-features --features server-only
+server-only = []

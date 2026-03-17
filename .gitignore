@@ -1,0 +1,29 @@
+# Rust
+target/
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+src-tauri/icons/*.ico
+src-tauri/icons/*.png
+
+# Data and workspace (local runtime)
+data/
+workspace/
+
+# Env and secrets
+.env
+.env.local
+*.pem
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/
+*.log

@@ -1,0 +1,227 @@
+//! Run Ansible playbooks or scripts and capture output.
+
+use crate::crud;
+use crate::db::DbPool;
+use regex::Regex;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use tempfile::NamedTempFile;
+
+/// Maximum job output size stored in DB (2 MiB). Larger output is truncated with a notice.
+const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const TRUNCATE_SUFFIX: &str = "\n\n[Output truncated: exceeded 2 MB limit]";
+
+fn truncate_output(out: &str) -> String {
+    let bytes = out.as_bytes();
+    if bytes.len() <= MAX_OUTPUT_BYTES {
+        return out.to_string();
+    }
+    let mut s = String::from_utf8_lossy(&bytes[..MAX_OUTPUT_BYTES]).into_owned();
+    s.push_str(TRUNCATE_SUFFIX);
+    s
+}
+
+const SCRIPT_EXTENSIONS: &[(&str, &[&str])] = &[
+    (".sh", &["bash"]),
+    (".bash", &["bash"]),
+    (".ps1", &["powershell", "-ExecutionPolicy", "Bypass", "-File"]),
+    (".psm1", &["powershell", "-ExecutionPolicy", "Bypass", "-File"]),
+    (".bat", &["cmd", "/c"]),
+    (".cmd", &["cmd", "/c"]),
+    (".py", &["python3"]),
+    (".rb", &["ruby"]),
+];
+
+lazy_static::lazy_static! {
+    static ref ENV_VAR_RE: Regex = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap();
+}
+
+fn is_script(path: &str) -> bool {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    SCRIPT_EXTENSIONS.iter().any(|(e, _)| *e == ext)
+}
+
+fn run_script(script_path: &str, extra_vars: &str, _timeout_secs: u64) -> (i32, String) {
+    let ext = Path::new(script_path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let runner = SCRIPT_EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, r)| r.to_vec());
+    let runner = match runner {
+        Some(r) => r,
+        None => return (1, format!("No runner for extension {}", ext)),
+    };
+
+    let abs_path = std::fs::canonicalize(script_path).unwrap_or_else(|_| Path::new(script_path).to_path_buf());
+    if !abs_path.is_file() {
+        return (1, format!("Script not found: {}", abs_path.display()));
+    }
+
+    let cwd = abs_path.parent().unwrap_or(Path::new("."));
+    let mut cmd = Command::new(&runner[0]);
+    if runner.len() > 1 {
+        cmd.args(&runner[1..]);
+    }
+    cmd.arg(&abs_path);
+    cmd.current_dir(cwd);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Parse extra_vars as KEY=value lines into env
+    for line in extra_vars.lines() {
+        let line = line.trim();
+        if line.contains('=') && !line.starts_with('#') {
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !k.is_empty() && ENV_VAR_RE.is_match(k) {
+                    cmd.env(k, v);
+                }
+            }
+        }
+    }
+
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => return (1, e.to_string()),
+    };
+    let out = String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr);
+    (output.status.code().unwrap_or(1), truncate_output(&out))
+}
+
+/// Run playbook (or script) and update job status in DB.
+pub fn run_playbook(
+    db: &DbPool,
+    job_id: i64,
+    playbook_path: &str,
+    inventory_content: &str,
+    extra_vars: &str,
+    credential_ssh_key: Option<&str>,
+    credential_ssh_password: Option<&str>,
+    credential_vault_password: Option<&str>,
+) -> (String, String) {
+    let _ = crud::update_job_status(db, job_id, "running", "");
+
+    if is_script(playbook_path) {
+        let (code, out) = run_script(playbook_path, extra_vars, 3600);
+        let status = if code == 0 { "success" } else { "failed" };
+        let out_capped = truncate_output(&out);
+        let _ = crud::update_job_status(db, job_id, status, &out_capped);
+        return (status.to_string(), out);
+    }
+
+    let playbook_abs = std::fs::canonicalize(playbook_path).unwrap_or_else(|_| Path::new(playbook_path).to_path_buf());
+    if !playbook_abs.is_file() {
+        let msg = format!("Playbook file not found: {}", playbook_abs.display());
+        let _ = crud::update_job_status(db, job_id, "failed", &msg);
+        return ("failed".into(), msg);
+    }
+
+    let inv_content = if inventory_content.is_empty() {
+        "[all]\nlocalhost ansible_connection=local\n".to_string()
+    } else {
+        inventory_content.to_string()
+    };
+
+    let inv = match NamedTempFile::with_suffix(".ini") {
+        Ok(f) => f,
+        Err(e) => {
+            let msg = format!("Failed to create temporary inventory file: {}", e);
+            let _ = crud::update_job_status(db, job_id, "failed", &msg);
+            return ("failed".to_string(), msg);
+        }
+    };
+    let _ = std::fs::write(inv.path(), &inv_content);
+
+    let mut _key_file = None;
+    let mut _vault_file = None;
+    let mut _extra_vars_file = None;
+
+    let mut args: Vec<String> = vec![
+        playbook_abs.to_string_lossy().to_string(),
+        "-i".into(),
+        inv.path().to_string_lossy().to_string(),
+    ];
+    if !extra_vars.trim().is_empty() {
+        args.push("-e".into());
+        args.push(extra_vars.trim().to_string());
+    }
+
+    if let Some(key) = credential_ssh_key {
+        if let Ok(f) = NamedTempFile::with_suffix(".pem") {
+            let key = key.trim();
+            let content = if key.ends_with('\n') { key.to_string() } else { format!("{}\n", key) };
+            if std::fs::write(f.path(), content).is_ok() {
+                #[cfg(unix)]
+                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                let path_str = f.path().to_string_lossy().to_string();
+                _key_file = Some(f);
+                args.push("--private-key".into());
+                args.push(path_str);
+            }
+        }
+    }
+
+    if let Some(vault) = credential_vault_password {
+        if let Ok(f) = NamedTempFile::with_suffix(".vault") {
+            if std::fs::write(f.path(), format!("{}\n", vault.trim())).is_ok() {
+                #[cfg(unix)]
+                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                let path_str = f.path().to_string_lossy().to_string();
+                _vault_file = Some(f);
+                args.push("--vault-password-file".into());
+                args.push(path_str);
+            }
+        }
+    }
+
+    if let Some(pass) = credential_ssh_password {
+        let yaml = format!("ansible_ssh_pass: {:?}\nansible_password: {:?}\n", pass, pass);
+        if let Ok(f) = NamedTempFile::with_suffix(".yml") {
+            if std::fs::write(f.path(), yaml).is_ok() {
+                #[cfg(unix)]
+                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                let path_str = format!("@{}", f.path().display());
+                _extra_vars_file = Some(f);
+                args.push("-e".into());
+                args.push(path_str);
+            }
+        }
+    }
+
+    let cwd = playbook_abs.parent().unwrap_or(Path::new("."));
+    let mut cmd = Command::new("ansible-playbook");
+    cmd.args(&args).current_dir(cwd);
+    let host_key_check = std::env::var("ANSIBLE_HOST_KEY_CHECKING").unwrap_or_else(|_| "False".into());
+    cmd.env("ANSIBLE_HOST_KEY_CHECKING", &host_key_check);
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let (tx, rx) = mpsc::channel();
+    let mut cmd = cmd;
+    thread::spawn(move || {
+        let output = cmd.output();
+        let _ = tx.send(output);
+    });
+    let output = match rx.recv_timeout(Duration::from_secs(3600)) {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            let msg = e.to_string();
+            let _ = crud::update_job_status(db, job_id, "failed", &msg);
+            return ("failed".into(), msg);
+        }
+        Err(_) => {
+            let msg = "Job timed out after 3600s.";
+            let _ = crud::update_job_status(db, job_id, "failed", msg);
+            return ("failed".into(), msg.to_string());
+        }
+    };
+
+    let out = String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr);
+    let out_capped = truncate_output(&out);
+    let status = if output.status.success() { "success" } else { "failed" };
+    let _ = crud::update_job_status(db, job_id, status, &out_capped);
+    (status.to_string(), out)
+}

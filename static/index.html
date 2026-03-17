@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ansible Control Panel</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;700&family=Red+Hat+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-brand">Ansible <span>Control Panel</span></div>
+      <ul class="sidebar-nav">
+        <li><a href="#" class="nav-link active" data-page="dashboard">Dashboard</a></li>
+        <li><a href="#" class="nav-link" data-page="projects">Projects</a></li>
+        <li><a href="#" class="nav-link" data-page="inventories">Inventories</a></li>
+        <li><a href="#" class="nav-link" data-page="credentials">Credentials</a></li>
+        <li><a href="#" class="nav-link" data-page="templates">Job Templates</a></li>
+        <li><a href="#" class="nav-link" data-page="jobs">Jobs</a></li>
+      </ul>
+    </aside>
+    <main class="main">
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <div id="modal-overlay" class="overlay hidden">
+    <div class="modal" id="modal"></div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
