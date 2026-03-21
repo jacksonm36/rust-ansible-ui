@@ -239,6 +239,104 @@ fn run_command_capturing(mut cmd: Command, timeout_secs: u64) -> CapturedRun {
     }
 }
 
+fn run_command_with_live_updates(
+    db: &DbPool,
+    job_id: i64,
+    mut cmd: Command,
+    timeout_secs: u64,
+) -> CapturedRun {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return CapturedRun::IoError(e.to_string()),
+    };
+    let mut out_pipe = match child.stdout.take() {
+        Some(o) => o,
+        None => return CapturedRun::IoError("stdout not piped".into()),
+    };
+    let mut err_pipe = match child.stderr.take() {
+        Some(e) => e,
+        None => return CapturedRun::IoError("stderr not piped".into()),
+    };
+
+    let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
+    let tx_o = tx.clone();
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match out_pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = tx_o.send((true, buf[..n].to_vec()));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match err_pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = tx.send((false, buf[..n].to_vec()));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut stdout = Vec::<u8>::new();
+    let mut stderr = Vec::<u8>::new();
+    let mut merged = String::new();
+    let mut last_flush = Instant::now();
+    let flush_every = Duration::from_millis(700);
+
+    loop {
+        while let Ok((is_stdout, chunk)) = rx.try_recv() {
+            if is_stdout {
+                stdout.extend_from_slice(&chunk);
+            } else {
+                stderr.extend_from_slice(&chunk);
+            }
+            merged.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
+        if last_flush.elapsed() >= flush_every {
+            let _ = crud::update_job_status(db, job_id, "running", &truncate_output(&merged));
+            last_flush = Instant::now();
+        }
+
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            while let Ok((is_stdout, chunk)) = rx.try_recv() {
+                if is_stdout {
+                    stdout.extend_from_slice(&chunk);
+                } else {
+                    stderr.extend_from_slice(&chunk);
+                }
+            }
+            return CapturedRun::TimedOut(stdout, stderr);
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                while let Ok((is_stdout, chunk)) = rx.try_recv() {
+                    if is_stdout {
+                        stdout.extend_from_slice(&chunk);
+                    } else {
+                        stderr.extend_from_slice(&chunk);
+                    }
+                }
+                return CapturedRun::Finished(status, stdout, stderr);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(e) => return CapturedRun::IoError(e.to_string()),
+        }
+    }
+}
+
 fn run_script(script_path: &str, extra_vars: &str, timeout_secs: u64) -> (i32, String) {
     let ext = Path::new(script_path)
         .extension()
@@ -441,7 +539,7 @@ pub fn run_playbook(
     cmd.stderr(Stdio::piped());
 
     let timeout_secs = playbook_timeout_secs();
-    let outcome = run_command_capturing(cmd, timeout_secs);
+    let outcome = run_command_with_live_updates(db, job_id, cmd, timeout_secs);
 
     let (out, status_str) = match outcome {
         CapturedRun::Finished(status, stdout, stderr) => {
