@@ -57,6 +57,7 @@ Create a `.env` file in the folder where you run the server, or set variables in
 | `ANSIBLE_UI_SECRET_KEY` | **Optional:** first **32 UTF-8 bytes** used as AES key. If unset or too short, the app loads `ANSIBLE_UI_KEYFILE` or `<database-dir>/ansible_ui_secret.key`; if missing, it **generates** a random key and writes that file. **Back up the key file** — without it, stored credentials cannot be decrypted. |
 | `ANSIBLE_UI_KEYFILE` | Override path to the secret key file (base64 of 32 bytes, one line; or raw 32 bytes; or 64 hex chars). |
 | `DATABASE_URL` | SQLite path. Default: `./data/ansible_ui.db`. Example: `DATABASE_URL=sqlite:///C:/path/to/ansible_ui.db` |
+| `ANSIBLE_UI_WORKSPACE` | **Optional:** directory for git clones (`project_<id>`). Default: `<parent of DB file>/workspace` when `DATABASE_URL` is set, else `<cwd>/workspace`. |
 | `ANSIBLE_HOST_KEY_CHECKING` | `True` / `False` — passed to Ansible (default `False` if unset). |
 | `ANSIBLE_UI_BIND` | Listen address, e.g. `0.0.0.0:14300` (all interfaces) or `127.0.0.1:14300` (default). |
 | `ANSIBLE_UI_EXTRA_ORIGINS` | Comma-separated CORS origins if you open the UI from another host/port (e.g. `http://192.168.1.10:14300`). |

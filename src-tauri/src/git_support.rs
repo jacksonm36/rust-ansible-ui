@@ -8,19 +8,59 @@ use tempfile::NamedTempFile;
 
 static WORKSPACE_LOCK: Mutex<()> = Mutex::new(());
 
+const WORKSPACE_ENV: &str = "ANSIBLE_UI_WORKSPACE";
+
+/// Git clones live under this directory (`project_<id>` per project).
 fn workspace_dir() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let ws = cwd.join("workspace");
-    if ws.exists() || cwd.join("static").exists() {
+    if let Ok(s) = std::env::var(WORKSPACE_ENV) {
+        let t = s.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+
+    // Production: same directory as the SQLite file (e.g. /var/lib/ansible-ui/workspace).
+    // Works even when `current_dir()` is wrong (e.g. `/`) or before `workspace/` exists.
+    if let Some(ws) = workspace_dir_from_database_url() {
         return ws;
     }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ws = cwd.join("workspace");
+    // Prefer cwd (systemd WorkingDirectory, `cargo run` from src-tauri, etc.) — do not require
+    // `workspace/` to exist yet (that caused fallback to exe path → `/workspace` and permission errors).
+    if cwd != Path::new("/") {
+        return ws;
+    }
+
+    // Dev fallback: repo root when running `target/debug/ansible-server` from a cargo tree.
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    let root = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).and_then(|p| p.parent()).unwrap_or(&cwd);
+    let root = exe
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| Path::new("."));
     root.join("workspace")
 }
 
+/// `<parent-of-db-file>/workspace` when `DATABASE_URL` is a sqlite path.
+/// Must match `db::db_path()` parsing: `sqlite://` prefix so `sqlite:///abs/path` → `/abs/path`.
+fn workspace_dir_from_database_url() -> Option<PathBuf> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let path_str = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:///"))?;
+    let db_path = Path::new(path_str);
+    let parent = db_path.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    Some(parent.join("workspace"))
+}
+
 fn workspace_path(project_id: i64) -> PathBuf {
-    let _guard = WORKSPACE_LOCK.lock().unwrap();
+    let _guard = WORKSPACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ws = workspace_dir();
     std::fs::create_dir_all(&ws).ok();
     ws.join(format!("project_{}", project_id))
