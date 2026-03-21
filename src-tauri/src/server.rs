@@ -717,10 +717,11 @@ pub fn app(source: StaticSource, db: DbPool) -> Router {
                 static_dir: None,
             };
             let api = api_routes(state.clone());
+            // matchit 0.7 / axum 0.7: use `/*name` not `{*name}` (braces break catch-all parsing).
             Router::new()
                 .route("/", get(serve_index))
-                .route("/static/{*path}", get(serve_embedded_static))
                 .nest("/api", api)
+                .route("/static/*path", get(serve_embedded_static))
                 .layer(RequestBodyLimitLayer::new(BODY_LIMIT_BYTES))
                 .layer(SetResponseHeaderLayer::if_not_present(
                     header::X_CONTENT_TYPE_OPTIONS,
