@@ -324,6 +324,26 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+function extractAnsibleUser(extra) {
+  const src = (extra || '').replace(/\r\n/g, '\n');
+  for (const line of src.split('\n')) {
+    const m = line.match(/^\s*ansible_user\s*:\s*(.+?)\s*$/);
+    if (m && m[1]) return m[1].replace(/^['"]|['"]$/g, '').trim();
+  }
+  return '';
+}
+
+function upsertAnsibleUser(extra, user) {
+  const lines = ((extra || '').replace(/\r\n/g, '\n')).split('\n');
+  const out = [];
+  for (const line of lines) {
+    if (!/^\s*ansible_user\s*:/.test(line)) out.push(line);
+  }
+  const u = (user || '').trim();
+  if (u) out.unshift(`ansible_user: ${u}`);
+  return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
+}
+
 // Schedule builder: friendly object <-> cron (backend)
 // cron = "minute hour day month dow" (dow: 0=Sun, 1=Mon, ..., 6=Sat)
 function scheduleToCron(s) {
@@ -475,6 +495,7 @@ function openInventoryModal(id) {
 
 function openCredentialModal(id) {
   const c = id ? credentials.find(x => x.id === id) : null;
+  const sshUser = c ? extractAnsibleUser(c.extra || '') : '';
   showModal(
     c ? 'Edit Credential' : 'New Credential',
     `
@@ -504,25 +525,38 @@ function openCredentialModal(id) {
         <textarea id="modal-cred-extra" placeholder="e.g. ansible_user: root&#10;ansible_ssh_common_args: '-o PreferredAuthentications=password'">${c ? escapeHtml(c.extra || '') : ''}</textarea>
         <small class="text-muted">SSH jobs run as the <strong>service account</strong> (e.g. ansible-ui) unless you set <code>ansible_user</code> here or in inventory.</small>
       </div>
+      <div class="form-group">
+        <label>SSH User</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="modal-ssh-user" value="${escapeHtml(sshUser)}" placeholder="e.g. root or ubuntu">
+          <button type="button" class="btn btn-sm btn-secondary" id="modal-apply-ssh-user">Use for SSH</button>
+        </div>
+      </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
      <button class="btn btn-primary" id="modal-save-cred" data-id="${id || ''}">Save</button>`
   );
   const sel = qs('#modal-cred-project');
+  const sshUserInput = qs('#modal-ssh-user');
+  const extraInput = qs('#modal-cred-extra');
+  qs('#modal-apply-ssh-user').onclick = () => {
+    extraInput.value = upsertAnsibleUser(extraInput.value, sshUserInput.value);
+  };
   if (!c && projects[0]) sel.value = projects[0].id;
   qs('#modal-save-cred').onclick = async () => {
     const name = qs('#modal-name').value.trim();
     const project_id = parseInt(sel.value, 10);
     const kind = qs('#modal-kind').value;
     const secret = qs('#modal-secret').value;
+    const mergedExtra = upsertAnsibleUser(extraInput.value, sshUserInput.value);
     if (!name || !project_id) return;
     if (!id && !secret) { alert('Secret is required for new credential'); return; }
     try {
       if (id) {
-        const body = { name, kind, extra: qs('#modal-cred-extra').value };
+        const body = { name, kind, extra: mergedExtra };
         if (secret) body.secret = secret;
         await fetchJSON(`${API}/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
-      } else await fetchJSON(`${API}/credentials`, { method: 'POST', body: JSON.stringify({ project_id, name, kind, secret: secret || 'x', extra: qs('#modal-cred-extra').value }) });
+      } else await fetchJSON(`${API}/credentials`, { method: 'POST', body: JSON.stringify({ project_id, name, kind, secret: secret || 'x', extra: mergedExtra }) });
       closeModal();
       reloadAndRender();
     } catch (e) { showError(e); }
