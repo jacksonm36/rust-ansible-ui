@@ -393,7 +393,7 @@ async fn get_job_template(State(state): State<AppState>, Path(id): Path<i64>) ->
 async fn get_next_run(State(state): State<AppState>, Path(id): Path<i64>) -> Result<Json<NextRunResponse>, Response> {
     let jt = crud::get_job_template(&state.db, id).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Job template not found"))?;
     let next = jt.schedule_enabled
-        .then(|| jt.schedule_cron.as_ref())
+        .then_some(jt.schedule_cron.as_ref())
         .flatten()
         .filter(|s| !s.is_empty())
         .and_then(|cron| crate::scheduler::next_run_iso(cron, jt.schedule_tz.as_deref().unwrap_or("UTC")));
@@ -449,7 +449,7 @@ async fn delete_job_template(State(state): State<AppState>, Path(id): Path<i64>)
 // --- Jobs ---
 async fn list_jobs(State(state): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Vec<JobListSummary>> {
     let project_id = q.get("project_id").and_then(|s| s.parse().ok());
-    let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(500).max(1);
+    let limit = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
     let list = match project_id {
         Some(pid) => crud::get_jobs_by_project(&state.db, pid, limit),
         None => crud::get_recent_jobs(&state.db, limit),

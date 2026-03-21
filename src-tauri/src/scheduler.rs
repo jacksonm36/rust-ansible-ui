@@ -106,7 +106,7 @@ fn tick(db: &DbPool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crud::set_job_template_schedule_last_fire(db, jt.id, Some(&slot.to_rfc3339()))?;
 
         if let Some(launch) = crate::server::launch_job_template_by_id_impl(db, jt.id) {
-            std::thread::spawn(move || launch());
+            std::thread::spawn(launch);
         }
     }
     Ok(())

@@ -23,16 +23,13 @@ static MASTER_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
 /// Parent directory of the SQLite file (aligned with `db` path resolution).
 fn database_parent_dir() -> PathBuf {
+    // Must match `db::db_path()`: `sqlite:///` + absolute path still matches `sqlite://` first → `/...`.
     let path = env::var("DATABASE_URL")
         .ok()
         .and_then(|u| {
-            if let Some(s) = u.strip_prefix("sqlite:///") {
-                Some(Path::new(s).to_path_buf())
-            } else if let Some(s) = u.strip_prefix("sqlite://") {
-                Some(Path::new(s).to_path_buf())
-            } else {
-                None
-            }
+            u.strip_prefix("sqlite://")
+                .or_else(|| u.strip_prefix("sqlite:///"))
+                .map(|s| Path::new(s).to_path_buf())
         })
         .unwrap_or_else(|| Path::new("./data/ansible_ui.db").to_path_buf());
     path.parent()

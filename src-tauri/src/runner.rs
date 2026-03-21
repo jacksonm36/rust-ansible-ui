@@ -243,7 +243,7 @@ fn run_script(script_path: &str, extra_vars: &str, timeout_secs: u64) -> (i32, S
     }
 
     let cwd = abs_path.parent().unwrap_or(Path::new("."));
-    let mut cmd = Command::new(&runner[0]);
+    let mut cmd = Command::new(runner[0]);
     if runner.len() > 1 {
         cmd.args(&runner[1..]);
     }
