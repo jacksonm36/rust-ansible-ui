@@ -385,7 +385,9 @@ qs('#modal-overlay').onclick = (e) => { if (e.target === e.currentTarget) closeM
 
 function openProjectModal(id) {
   const p = id ? projects.find(x => x.id === id) : null;
-  const credOptions = credentials.filter(c => c.kind === 'ssh' || c.kind === 'git').map(c => `<option value="${c.id}" ${p && p.git_credential_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)} (${c.kind})</option>`).join('');
+  const credOptions = p
+    ? credentials.filter(c => (c.kind === 'ssh' || c.kind === 'git') && c.project_id === p.id).map(c => `<option value="${c.id}" ${p.git_credential_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)} (${c.kind})</option>`).join('')
+    : '';
   showModal(
     p ? 'Edit Project' : 'New Project',
     `
@@ -407,7 +409,7 @@ function openProjectModal(id) {
       </div>
       <div class="form-group">
         <label>Git credential (for private repos: SSH key or Git token)</label>
-        <select id="modal-git-cred"><option value="">— None (public repo) —</option>${credOptions}</select>
+        <select id="modal-git-cred"><option value="">— None (public repo) —</option>${credOptions || '<option value="" disabled>Save project first, then add credentials for this project and edit to attach</option>'}</select>
       </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
@@ -421,8 +423,14 @@ function openProjectModal(id) {
     const gcid = qs('#modal-git-cred').value;
     const git_credential_id = gcid ? parseInt(gcid, 10) : null;
     try {
-      if (id) await fetchJSON(`${API}/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ name, description: qs('#modal-desc').value, git_url, git_branch, git_credential_id }) });
-      else await fetchJSON(`${API}/projects`, { method: 'POST', body: JSON.stringify({ name, description: qs('#modal-desc').value, git_url, git_branch, git_credential_id }) });
+      if (id) {
+        await fetchJSON(`${API}/projects/${id}`, { method: 'PATCH', body: JSON.stringify({ name, description: qs('#modal-desc').value, git_url, git_branch, git_credential_id }) });
+      } else {
+        const created = await fetchJSON(`${API}/projects`, { method: 'POST', body: JSON.stringify({ name, description: qs('#modal-desc').value, git_url, git_branch }) });
+        if (git_credential_id != null && created && created.id) {
+          await fetchJSON(`${API}/projects/${created.id}`, { method: 'PATCH', body: JSON.stringify({ git_credential_id }) });
+        }
+      }
       closeModal();
       reloadAndRender();
     } catch (e) { showError(e); }

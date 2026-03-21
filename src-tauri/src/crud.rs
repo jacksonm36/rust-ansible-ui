@@ -310,7 +310,7 @@ pub fn delete_credential(db: &DbPool, id: i64) -> bool {
 pub fn get_job_template(db: &DbPool, id: i64) -> Option<JobTemplateRead> {
     let c = conn(db);
     let mut stmt = c.prepare(
-        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at FROM job_templates WHERE id = ?1",
+        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at, schedule_last_fire_utc FROM job_templates WHERE id = ?1",
     ).ok()?;
     stmt.query_row(params![id], |r| {
         Ok(JobTemplateRead {
@@ -325,6 +325,7 @@ pub fn get_job_template(db: &DbPool, id: i64) -> Option<JobTemplateRead> {
             schedule_enabled: r.get::<_, i64>(8)? != 0,
             schedule_cron: r.get(9)?,
             schedule_tz: r.get(10)?,
+            schedule_last_fire_utc: r.get(13)?,
             created_at: r.get(11)?,
             updated_at: r.get(12)?,
         })
@@ -334,7 +335,7 @@ pub fn get_job_template(db: &DbPool, id: i64) -> Option<JobTemplateRead> {
 pub fn get_job_templates_by_project(db: &DbPool, project_id: i64) -> Vec<JobTemplateRead> {
     let c = conn(db);
     let mut stmt = match c.prepare(
-        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at FROM job_templates WHERE project_id = ?1 ORDER BY name",
+        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at, schedule_last_fire_utc FROM job_templates WHERE project_id = ?1 ORDER BY name",
     ) {
         Ok(s) => s,
         Err(_) => return vec![],
@@ -352,6 +353,7 @@ pub fn get_job_templates_by_project(db: &DbPool, project_id: i64) -> Vec<JobTemp
             schedule_enabled: r.get::<_, i64>(8)? != 0,
             schedule_cron: r.get(9)?,
             schedule_tz: r.get(10)?,
+            schedule_last_fire_utc: r.get(13)?,
             created_at: r.get(11)?,
             updated_at: r.get(12)?,
         })
@@ -365,7 +367,7 @@ pub fn get_job_templates_by_project(db: &DbPool, project_id: i64) -> Vec<JobTemp
 pub fn get_scheduled_job_templates(db: &DbPool) -> Vec<JobTemplateRead> {
     let c = conn(db);
     let mut stmt = match c.prepare(
-        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at FROM job_templates WHERE schedule_enabled = 1 AND schedule_cron IS NOT NULL AND schedule_cron != ''",
+        "SELECT id, project_id, name, description, playbook_path, inventory_id, credential_id, extra_vars, schedule_enabled, schedule_cron, schedule_tz, created_at, updated_at, schedule_last_fire_utc FROM job_templates WHERE schedule_enabled = 1 AND schedule_cron IS NOT NULL AND schedule_cron != ''",
     ) {
         Ok(s) => s,
         Err(_) => return vec![],
@@ -383,6 +385,7 @@ pub fn get_scheduled_job_templates(db: &DbPool) -> Vec<JobTemplateRead> {
             schedule_enabled: true,
             schedule_cron: r.get(9)?,
             schedule_tz: r.get(10)?,
+            schedule_last_fire_utc: r.get(13)?,
             created_at: r.get(11)?,
             updated_at: r.get(12)?,
         })
@@ -426,6 +429,7 @@ pub fn create_job_template(db: &DbPool, data: &JobTemplateCreate) -> Result<JobT
         schedule_enabled: data.schedule_enabled.unwrap_or(false),
         schedule_cron: data.schedule_cron.clone(),
         schedule_tz: data.schedule_tz.clone().or_else(|| Some("UTC".into())),
+        schedule_last_fire_utc: None,
         created_at: now.clone(),
         updated_at: now,
     })
@@ -440,13 +444,35 @@ pub fn update_job_template(db: &DbPool, id: i64, data: &JobTemplateUpdate) -> Op
     let credential_id = data.credential_id.or(jt.credential_id);
     let extra_vars = data.extra_vars.as_deref().unwrap_or(&jt.extra_vars).to_string();
     let schedule_enabled = data.schedule_enabled.unwrap_or(jt.schedule_enabled);
-    let schedule_cron = data.schedule_cron.clone().or(jt.schedule_cron);
-    let schedule_tz = data.schedule_tz.clone().or(jt.schedule_tz);
+    let schedule_cron = data.schedule_cron.clone().or(jt.schedule_cron.clone());
+    let schedule_tz = data.schedule_tz.clone().or(jt.schedule_tz.clone());
+    let cron_changed = data
+        .schedule_cron
+        .as_ref()
+        .is_some_and(|c| jt.schedule_cron.as_ref() != Some(c));
+    let tz_changed = data
+        .schedule_tz
+        .as_ref()
+        .is_some_and(|t| jt.schedule_tz.as_ref() != Some(t));
+    let reset_last_fire = !schedule_enabled || cron_changed || tz_changed;
     let now = utc_now_iso();
     conn(db).execute(
         "UPDATE job_templates SET name=?1, description=?2, playbook_path=?3, inventory_id=?4, credential_id=?5, extra_vars=?6, schedule_enabled=?7, schedule_cron=?8, schedule_tz=?9, updated_at=?10 WHERE id=?11",
         params![name, description, playbook_path, inventory_id, credential_id, extra_vars, if schedule_enabled { 1i64 } else { 0 }, schedule_cron, schedule_tz.as_deref().unwrap_or("UTC"), now, id],
     ).ok()?;
+    if reset_last_fire {
+        conn(db)
+            .execute(
+                "UPDATE job_templates SET schedule_last_fire_utc = NULL WHERE id = ?1",
+                params![id],
+            )
+            .ok();
+    }
+    let last_fire = if reset_last_fire {
+        None
+    } else {
+        jt.schedule_last_fire_utc.clone()
+    };
     Some(JobTemplateRead {
         id,
         project_id: jt.project_id,
@@ -459,9 +485,23 @@ pub fn update_job_template(db: &DbPool, id: i64, data: &JobTemplateUpdate) -> Op
         schedule_enabled,
         schedule_cron,
         schedule_tz,
+        schedule_last_fire_utc: last_fire,
         created_at: jt.created_at,
         updated_at: now,
     })
+}
+
+/// Persist the schedule slot (RFC3339 UTC) that was just fired, so restarts and multi-instance avoid duplicate runs.
+pub fn set_job_template_schedule_last_fire(
+    db: &DbPool,
+    id: i64,
+    fire_rfc3339: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    conn(db).execute(
+        "UPDATE job_templates SET schedule_last_fire_utc = ?1 WHERE id = ?2",
+        params![fire_rfc3339, id],
+    )?;
+    Ok(())
 }
 
 pub fn delete_job_template(db: &DbPool, id: i64) -> bool {

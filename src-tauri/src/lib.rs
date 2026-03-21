@@ -58,7 +58,7 @@ fn run_server(static_dir: PathBuf, _app_handle: tauri::AppHandle) {
     let conn = db::init_db().expect("init_db");
     let db = Arc::new(std::sync::Mutex::new(conn));
     scheduler::start_scheduler(db.clone());
-    let app_router = server::app(static_dir, db);
+    let app_router = server::app(server::StaticSource::Filesystem(static_dir), db);
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {

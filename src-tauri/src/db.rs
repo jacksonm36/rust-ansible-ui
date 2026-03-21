@@ -101,13 +101,14 @@ fn create_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Add columns if missing (SQLite doesn't have IF NOT EXISTS for columns)
-    let migrations: [(&str, &str); 6] = [
+    let migrations: [(&str, &str); 7] = [
         ("projects", "ALTER TABLE projects ADD COLUMN git_url VARCHAR(512)"),
         ("projects", "ALTER TABLE projects ADD COLUMN git_branch VARCHAR(64)"),
         ("projects", "ALTER TABLE projects ADD COLUMN git_credential_id INTEGER"),
         ("job_templates", "ALTER TABLE job_templates ADD COLUMN schedule_enabled INTEGER DEFAULT 0"),
         ("job_templates", "ALTER TABLE job_templates ADD COLUMN schedule_cron VARCHAR(128)"),
         ("job_templates", "ALTER TABLE job_templates ADD COLUMN schedule_tz VARCHAR(64)"),
+        ("job_templates", "ALTER TABLE job_templates ADD COLUMN schedule_last_fire_utc TEXT"),
     ];
     for (table, sql) in migrations {
         if let Err(e) = conn.execute(sql, []) {

@@ -99,6 +99,9 @@ pub struct JobTemplateRead {
     pub schedule_enabled: bool,
     pub schedule_cron: Option<String>,
     pub schedule_tz: Option<String>,
+    /// Last schedule slot (RFC3339 UTC) for which a run was triggered; persisted for multi-instance correctness. Not exposed in API JSON.
+    #[serde(default, skip_serializing)]
+    pub schedule_last_fire_utc: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

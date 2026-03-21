@@ -3,11 +3,12 @@
 use crate::crud;
 use crate::db::DbPool;
 use regex::Regex;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
 /// Maximum job output size stored in DB (2 MiB). Larger output is truncated with a notice.
@@ -39,20 +40,101 @@ lazy_static::lazy_static! {
     static ref ENV_VAR_RE: Regex = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap();
 }
 
+fn parse_timeout_secs(var: Option<String>, default: u64) -> u64 {
+    var.and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0 && n <= 604_800)
+        .unwrap_or(default)
+}
+
+fn playbook_timeout_secs() -> u64 {
+    let primary = std::env::var("ANSIBLE_UI_PLAYBOOK_TIMEOUT_SECS").ok();
+    let fallback = std::env::var("ANSIBLE_UI_JOB_TIMEOUT_SECS").ok();
+    parse_timeout_secs(primary.or(fallback), 3600)
+}
+
+fn script_timeout_secs() -> u64 {
+    parse_timeout_secs(std::env::var("ANSIBLE_UI_SCRIPT_TIMEOUT_SECS").ok(), 3600)
+}
+
 fn is_script(path: &str) -> bool {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     SCRIPT_EXTENSIONS.iter().any(|(e, _)| *e == ext)
 }
 
-fn run_script(script_path: &str, extra_vars: &str, _timeout_secs: u64) -> (i32, String) {
-    let ext = Path::new(script_path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let runner = SCRIPT_EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, r)| r.to_vec());
+enum CapturedRun {
+    Finished(std::process::ExitStatus, Vec<u8>, Vec<u8>),
+    TimedOut(Vec<u8>, Vec<u8>),
+    IoError(String),
+}
+
+fn run_command_capturing(mut cmd: Command, timeout_secs: u64) -> CapturedRun {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return CapturedRun::IoError(e.to_string()),
+    };
+    let mut out_pipe = match child.stdout.take() {
+        Some(o) => o,
+        None => return CapturedRun::IoError("stdout not piped".into()),
+    };
+    let mut err_pipe = match child.stderr.take() {
+        Some(e) => e,
+        None => return CapturedRun::IoError("stderr not piped".into()),
+    };
+    let (tx_o, rx_o) = mpsc::channel();
+    let (tx_e, rx_e) = mpsc::channel();
+    thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out_pipe.read_to_end(&mut v);
+        let _ = tx_o.send(v);
+    });
+    thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err_pipe.read_to_end(&mut v);
+        let _ = tx_e.send(v);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = rx_o.recv().unwrap_or_default();
+            let stderr = rx_e.recv().unwrap_or_default();
+            return CapturedRun::TimedOut(stdout, stderr);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = rx_o.recv().unwrap_or_default();
+                let stderr = rx_e.recv().unwrap_or_default();
+                return CapturedRun::Finished(status, stdout, stderr);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(e) => return CapturedRun::IoError(e.to_string()),
+        }
+    }
+}
+
+fn run_script(script_path: &str, extra_vars: &str, timeout_secs: u64) -> (i32, String) {
+    let ext = Path::new(script_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let runner = SCRIPT_EXTENSIONS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, r)| r.to_vec());
     let runner = match runner {
         Some(r) => r,
         None => return (1, format!("No runner for extension {}", ext)),
     };
 
-    let abs_path = std::fs::canonicalize(script_path).unwrap_or_else(|_| Path::new(script_path).to_path_buf());
+    let abs_path =
+        std::fs::canonicalize(script_path).unwrap_or_else(|_| Path::new(script_path).to_path_buf());
     if !abs_path.is_file() {
         return (1, format!("Script not found: {}", abs_path.display()));
     }
@@ -67,7 +149,6 @@ fn run_script(script_path: &str, extra_vars: &str, _timeout_secs: u64) -> (i32, 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    // Parse extra_vars as KEY=value lines into env
     for line in extra_vars.lines() {
         let line = line.trim();
         if line.contains('=') && !line.starts_with('#') {
@@ -81,12 +162,23 @@ fn run_script(script_path: &str, extra_vars: &str, _timeout_secs: u64) -> (i32, 
         }
     }
 
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => return (1, e.to_string()),
-    };
-    let out = String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr);
-    (output.status.code().unwrap_or(1), truncate_output(&out))
+    match run_command_capturing(cmd, timeout_secs) {
+        CapturedRun::Finished(status, stdout, stderr) => {
+            let out = String::from_utf8_lossy(&stdout).to_string()
+                + &String::from_utf8_lossy(&stderr);
+            (status.code().unwrap_or(1), truncate_output(&out))
+        }
+        CapturedRun::TimedOut(stdout, stderr) => {
+            let mut out = String::from_utf8_lossy(&stdout).to_string()
+                + &String::from_utf8_lossy(&stderr);
+            out.push_str(&format!(
+                "\n\n[Process killed: exceeded {}s timeout]",
+                timeout_secs
+            ));
+            (124, truncate_output(&out))
+        }
+        CapturedRun::IoError(e) => (1, e),
+    }
 }
 
 /// Run playbook (or script) and update job status in DB.
@@ -103,14 +195,16 @@ pub fn run_playbook(
     let _ = crud::update_job_status(db, job_id, "running", "");
 
     if is_script(playbook_path) {
-        let (code, out) = run_script(playbook_path, extra_vars, 3600);
+        let to = script_timeout_secs();
+        let (code, out) = run_script(playbook_path, extra_vars, to);
         let status = if code == 0 { "success" } else { "failed" };
         let out_capped = truncate_output(&out);
         let _ = crud::update_job_status(db, job_id, status, &out_capped);
         return (status.to_string(), out);
     }
 
-    let playbook_abs = std::fs::canonicalize(playbook_path).unwrap_or_else(|_| Path::new(playbook_path).to_path_buf());
+    let playbook_abs = std::fs::canonicalize(playbook_path)
+        .unwrap_or_else(|_| Path::new(playbook_path).to_path_buf());
     if !playbook_abs.is_file() {
         let msg = format!("Playbook file not found: {}", playbook_abs.display());
         let _ = crud::update_job_status(db, job_id, "failed", &msg);
@@ -150,10 +244,17 @@ pub fn run_playbook(
     if let Some(key) = credential_ssh_key {
         if let Ok(f) = NamedTempFile::with_suffix(".pem") {
             let key = key.trim();
-            let content = if key.ends_with('\n') { key.to_string() } else { format!("{}\n", key) };
+            let content = if key.ends_with('\n') {
+                key.to_string()
+            } else {
+                format!("{}\n", key)
+            };
             if std::fs::write(f.path(), content).is_ok() {
                 #[cfg(unix)]
-                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok();
+                }
                 let path_str = f.path().to_string_lossy().to_string();
                 _key_file = Some(f);
                 args.push("--private-key".into());
@@ -166,7 +267,10 @@ pub fn run_playbook(
         if let Ok(f) = NamedTempFile::with_suffix(".vault") {
             if std::fs::write(f.path(), format!("{}\n", vault.trim())).is_ok() {
                 #[cfg(unix)]
-                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok();
+                }
                 let path_str = f.path().to_string_lossy().to_string();
                 _vault_file = Some(f);
                 args.push("--vault-password-file".into());
@@ -180,7 +284,10 @@ pub fn run_playbook(
         if let Ok(f) = NamedTempFile::with_suffix(".yml") {
             if std::fs::write(f.path(), yaml).is_ok() {
                 #[cfg(unix)]
-                { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok(); }
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok();
+                }
                 let path_str = format!("@{}", f.path().display());
                 _extra_vars_file = Some(f);
                 args.push("-e".into());
@@ -192,36 +299,40 @@ pub fn run_playbook(
     let cwd = playbook_abs.parent().unwrap_or(Path::new("."));
     let mut cmd = Command::new("ansible-playbook");
     cmd.args(&args).current_dir(cwd);
-    let host_key_check = std::env::var("ANSIBLE_HOST_KEY_CHECKING").unwrap_or_else(|_| "False".into());
+    let host_key_check =
+        std::env::var("ANSIBLE_HOST_KEY_CHECKING").unwrap_or_else(|_| "False".into());
     cmd.env("ANSIBLE_HOST_KEY_CHECKING", &host_key_check);
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let (tx, rx) = mpsc::channel();
-    let mut cmd = cmd;
-    thread::spawn(move || {
-        let output = cmd.output();
-        let _ = tx.send(output);
-    });
-    let output = match rx.recv_timeout(Duration::from_secs(3600)) {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            let _ = crud::update_job_status(db, job_id, "failed", &msg);
-            return ("failed".into(), msg);
+    let timeout_secs = playbook_timeout_secs();
+    let outcome = run_command_capturing(cmd, timeout_secs);
+
+    let (out, status_str) = match outcome {
+        CapturedRun::Finished(status, stdout, stderr) => {
+            let out = String::from_utf8_lossy(&stdout).to_string()
+                + &String::from_utf8_lossy(&stderr);
+            let s = if status.success() { "success" } else { "failed" };
+            (out, s)
         }
-        Err(_) => {
-            let msg = "Job timed out after 3600s.";
-            let _ = crud::update_job_status(db, job_id, "failed", msg);
-            return ("failed".into(), msg.to_string());
+        CapturedRun::TimedOut(stdout, stderr) => {
+            let mut out = String::from_utf8_lossy(&stdout).to_string()
+                + &String::from_utf8_lossy(&stderr);
+            out.push_str(&format!(
+                "\n\n[ansible-playbook killed: exceeded {}s timeout]",
+                timeout_secs
+            ));
+            (out, "failed")
+        }
+        CapturedRun::IoError(e) => {
+            let _ = crud::update_job_status(db, job_id, "failed", &e);
+            return ("failed".into(), e);
         }
     };
 
-    let out = String::from_utf8_lossy(&output.stdout).to_string() + &String::from_utf8_lossy(&output.stderr);
     let out_capped = truncate_output(&out);
-    let status = if output.status.success() { "success" } else { "failed" };
-    let _ = crud::update_job_status(db, job_id, status, &out_capped);
-    (status.to_string(), out)
+    let _ = crud::update_job_status(db, job_id, status_str, &out_capped);
+    (status_str.to_string(), out)
 }

@@ -13,16 +13,59 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(feature = "embedded-static")]
+use axum::{
+    body::Body,
+    http::{header, Method, Uri},
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 
+#[cfg(feature = "embedded-static")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../static/"]
+struct EmbeddedStatic;
+
+/// Where UI assets are loaded from.
+#[derive(Clone)]
+pub enum StaticSource {
+    /// Serve from a directory on disk (development / Tauri).
+    Filesystem(PathBuf),
+    /// Serve from assets embedded at compile time (`embedded-static` feature).
+    #[cfg(feature = "embedded-static")]
+    Embedded,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DbPool,
-    pub static_dir: PathBuf,
+    /// `None` when using compile-time embedded static files.
+    pub static_dir: Option<PathBuf>,
+}
+
+#[cfg(feature = "embedded-static")]
+fn mime_for_path(path: &str) -> &'static str {
+    let p = path.to_lowercase();
+    if p.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if p.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if p.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if p.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if p.ends_with(".svg") {
+        "image/svg+xml"
+    } else if p.ends_with(".png") {
+        "image/png"
+    } else if p.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 fn api_err(status: StatusCode, detail: &str) -> Response {
@@ -30,10 +73,86 @@ fn api_err(status: StatusCode, detail: &str) -> Response {
 }
 
 async fn serve_index(State(state): State<AppState>) -> Response {
-    let path = state.static_dir.join("index.html");
-    match std::fs::read_to_string(&path) {
-        Ok(html) => Html(html).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
+    if let Some(dir) = &state.static_dir {
+        let path = dir.join("index.html");
+        match std::fs::read_to_string(&path) {
+            Ok(html) => Html(html).into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
+        }
+    } else {
+        #[cfg(feature = "embedded-static")]
+        {
+            match EmbeddedStatic::get("index.html") {
+                Some(f) => {
+                    let html = String::from_utf8_lossy(f.data.as_ref()).into_owned();
+                    Html(html).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
+            }
+        }
+        #[cfg(not(feature = "embedded-static"))]
+        {
+            (StatusCode::INTERNAL_SERVER_ERROR, "embedded static not enabled").into_response()
+        }
+    }
+}
+
+#[cfg(feature = "embedded-static")]
+fn embedded_file_response(path: &str) -> Response {
+    if path.contains("..") {
+        return (StatusCode::FORBIDDEN, "invalid path").into_response();
+    }
+    match EmbeddedStatic::get(path) {
+        Some(f) => {
+            let mime = mime_for_path(path);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .body(Body::from(f.data.into_owned()))
+                .unwrap()
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+#[cfg(feature = "embedded-static")]
+async fn serve_embedded_static(Path(path): Path<String>) -> Response {
+    embedded_file_response(path.trim_start_matches('/'))
+}
+
+#[cfg(feature = "embedded-static")]
+async fn serve_embedded_fallback(uri: Uri, method: Method) -> Response {
+    if method != Method::GET {
+        return (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response();
+    }
+    let p = uri.path().trim_start_matches('/').trim_end_matches('/');
+    if p.contains("..") {
+        return (StatusCode::FORBIDDEN, "invalid path").into_response();
+    }
+    if p.starts_with("api") {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    if p.is_empty() {
+        return (StatusCode::FOUND, [(header::LOCATION, "/")]).into_response();
+    }
+    match EmbeddedStatic::get(p) {
+        Some(f) => {
+            let mime = mime_for_path(p);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .body(Body::from(f.data.into_owned()))
+                .unwrap()
+                .into_response()
+        }
+        None => match EmbeddedStatic::get("index.html") {
+            Some(f) => {
+                let html = String::from_utf8_lossy(f.data.as_ref()).into_owned();
+                Html(html).into_response()
+            }
+            None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        },
     }
 }
 
@@ -76,6 +195,13 @@ async fn create_project(State(state): State<AppState>, Json(data): Json<ProjectC
             return Err(api_err(StatusCode::BAD_REQUEST, &e));
         }
     }
+    // Credentials are scoped to a project_id; the new project has no id yet — set Git credential after create via Edit.
+    if data.git_credential_id.is_some() {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Cannot set Git credential when creating a project. Create the project, then edit it to attach a credential.",
+        ));
+    }
     crud::create_project(&state.db, &data).map(Json).map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create project"))
 }
 
@@ -83,6 +209,12 @@ async fn update_project(State(state): State<AppState>, Path(id): Path<i64>, Json
     if let Some(ref b) = data.git_branch {
         if let Err(e) = git_support::validate_branch(b) {
             return Err(api_err(StatusCode::BAD_REQUEST, &e));
+        }
+    }
+    if let Some(cid) = data.git_credential_id {
+        let cred = crud::get_credential(&state.db, cid).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Credential not found"))?;
+        if cred.project_id != id {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Credential does not belong to this project"));
         }
     }
     crud::update_project(&state.db, id, &data).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Project not found")).map(Json)
@@ -102,6 +234,12 @@ async fn pull_project(State(state): State<AppState>, Path(id): Path<i64>) -> Res
     let mut https_token = None;
     if let Some(cred_id) = p.5 {
         if let Some(cred) = crud::get_credential(&state.db, cred_id) {
+            if cred.project_id != p.0 {
+                return Err(api_err(
+                    StatusCode::BAD_REQUEST,
+                    "Git credential does not belong to this project",
+                ));
+            }
             if let Some(secret) = crud::get_credential_secret(&state.db, cred_id) {
                 if cred.kind == "ssh" {
                     ssh_key = Some(secret);
@@ -217,8 +355,9 @@ async fn create_job_template(State(state): State<AppState>, Json(data): Json<Job
         return Err(api_err(StatusCode::NOT_FOUND, "Project not found"));
     }
     if let Some(iid) = data.inventory_id {
-        if crud::get_inventory(&state.db, iid).is_none() {
-            return Err(api_err(StatusCode::NOT_FOUND, "Inventory not found"));
+        let inv = crud::get_inventory(&state.db, iid).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Inventory not found"))?;
+        if inv.project_id != data.project_id {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Inventory does not belong to this project"));
         }
     }
     if let Some(cid) = data.credential_id {
@@ -236,6 +375,13 @@ async fn update_job_template(State(state): State<AppState>, Path(id): Path<i64>,
         let cred = crud::get_credential(&state.db, cid).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Credential not found"))?;
         if cred.project_id != jt.project_id {
             return Err(api_err(StatusCode::BAD_REQUEST, "Credential does not belong to this project"));
+        }
+    }
+    let effective_inventory = data.inventory_id.or(jt.inventory_id);
+    if let Some(iid) = effective_inventory {
+        let inv = crud::get_inventory(&state.db, iid).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Inventory not found"))?;
+        if inv.project_id != jt.project_id {
+            return Err(api_err(StatusCode::BAD_REQUEST, "Inventory does not belong to this project"));
         }
     }
     crud::update_job_template(&state.db, id, &data).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Job template not found")).map(Json)
@@ -287,6 +433,9 @@ fn resolve_playbook_and_creds(
             let mut https_token = None;
             if let Some(cred_id) = project.5 {
                 if let Some(cred) = crud::get_credential(db, cred_id) {
+                    if cred.project_id != project.0 {
+                        return Err("Git credential does not belong to this project.".into());
+                    }
                     if let Some(secret) = crud::get_credential_secret(db, cred_id) {
                         if cred.kind == "ssh" {
                             ssh_key = Some(secret);
@@ -407,10 +556,42 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
     crud::get_job(&state.db, job.id).map(Json).ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Job not found"))
 }
 
-pub fn app(static_dir: PathBuf, db: DbPool) -> Router {
-    let state = AppState { db, static_dir: static_dir.clone() };
-    // API routes under /api (nest strips prefix, so paths here are relative to /api)
-    let api = Router::new()
+fn cors_layer() -> CorsLayer {
+    let mut allowed_origins: Vec<HeaderValue> = [
+        "http://127.0.0.1:14300",
+        "http://localhost:14300",
+        "null",
+    ]
+    .iter()
+    .filter_map(|s| HeaderValue::try_from(*s).ok())
+    .collect();
+    if let Ok(extra) = std::env::var("ANSIBLE_UI_EXTRA_ORIGINS") {
+        for o in extra.split(',') {
+            let o = o.trim();
+            // AllowOrigin::list panics on wildcard; reject empty and "*"
+            if o.is_empty() || o == "*" {
+                continue;
+            }
+            if let Ok(h) = HeaderValue::try_from(o) {
+                allowed_origins.push(h);
+            }
+        }
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed_origins))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([axum::http::header::CONTENT_TYPE])
+}
+
+/// API routes only (nested under `/api`).
+fn api_routes(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}/pull", post(pull_project))
         .route("/projects/{id}", get(get_project).patch(update_project).delete(delete_project))
@@ -424,29 +605,45 @@ pub fn app(static_dir: PathBuf, db: DbPool) -> Router {
         .route("/jobs", get(list_jobs))
         .route("/jobs/launch", post(launch_job))
         .route("/jobs/{id}", get(get_job).delete(delete_job))
-        .with_state(state.clone());
-
-    let allowed_origins: Vec<HeaderValue> = [
-        "http://127.0.0.1:14300",
-        "http://localhost:14300",
-        "null",
-    ]
-    .iter()
-    .filter_map(|s| HeaderValue::try_from(*s).ok())
-    .collect();
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(allowed_origins))
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PATCH, axum::http::Method::DELETE, axum::http::Method::OPTIONS])
-        .allow_headers([axum::http::header::CONTENT_TYPE]);
-
-    const BODY_LIMIT: usize = 2 * 1024 * 1024; // 2 MiB
-    let static_service = ServeDir::new(static_dir.clone());
-    Router::new()
-        .route("/", get(serve_index))
-        .nest_service("/static", static_service.clone())
-        .nest("/api", api)
-        .layer(RequestBodyLimitLayer::new(BODY_LIMIT))
-        .layer(cors)
         .with_state(state)
-        .fallback_service(static_service)
+}
+
+const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+pub fn app(source: StaticSource, db: DbPool) -> Router {
+    let cors = cors_layer();
+    match source {
+        #[cfg(feature = "embedded-static")]
+        StaticSource::Embedded => {
+            let state = AppState {
+                db,
+                static_dir: None,
+            };
+            let api = api_routes(state.clone());
+            Router::new()
+                .route("/", get(serve_index))
+                .route("/static/{*path}", get(serve_embedded_static))
+                .nest("/api", api)
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_BYTES))
+                .layer(cors)
+                .with_state(state)
+                .fallback(get(serve_embedded_fallback))
+        }
+        StaticSource::Filesystem(static_dir) => {
+            let state = AppState {
+                db,
+                static_dir: Some(static_dir.clone()),
+            };
+            let api = api_routes(state.clone());
+            let static_service = ServeDir::new(static_dir);
+            Router::new()
+                .route("/", get(serve_index))
+                .nest_service("/static", static_service.clone())
+                .nest("/api", api)
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_BYTES))
+                .layer(cors)
+                .with_state(state)
+                .fallback_service(static_service)
+        }
+    }
 }

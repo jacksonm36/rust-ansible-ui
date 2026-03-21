@@ -34,6 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lazy_static = "1"
 walkdir = "2"
+rust-embed = { version = "8", optional = true }
 
 [[bin]]
 name = "ansible-server"
@@ -46,3 +47,6 @@ tauri-app = ["tauri", "tauri-plugin-shell", "custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 # Server-only: no Tauri, no icons. Use: cargo build --bin ansible-server --no-default-features --features server-only
 server-only = []
+# Embed static/ into the binary (single-file deploy). Use with server-only:
+#   cargo build --release --bin ansible-server --no-default-features --features "server-only,embedded-static"
+embedded-static = ["dep:rust-embed"]
