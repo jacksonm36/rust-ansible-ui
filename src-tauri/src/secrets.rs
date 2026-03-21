@@ -45,9 +45,10 @@ fn default_keyfile_path() -> PathBuf {
 }
 
 fn keyfile_path() -> PathBuf {
-    env::var(ENV_KEYFILE)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_keyfile_path())
+    match env::var(ENV_KEYFILE) {
+        Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
+        _ => default_keyfile_path(),
+    }
 }
 
 /// Try to interpret `raw` as 32 key bytes: base64 decode, or raw file bytes (first 32).

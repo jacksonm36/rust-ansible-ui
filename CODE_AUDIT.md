@@ -18,6 +18,8 @@
 | **Security** | Predictable **default AES key** when env unset | If `ANSIBLE_UI_SECRET_KEY` unset/short: load keyfile (`ANSIBLE_UI_KEYFILE` or `<db-dir>/ansible_ui_secret.key`); else **generate** 32 random bytes, persist (base64), cache in `OnceLock` |
 | **Security / Ops** | Playbook **timeout** did not **kill** the child | `Child` + `try_wait` + `kill()`; scripts use the same path |
 | **Correctness** | Scheduler used in-memory last-run | Persist cron **slot** in `schedule_last_fire_utc`; 180s grace window; reset when schedule off or cron/tz changes |
+| **Security** | Embedded static `..` only; credential `kind` unvalidated | Stricter asset path check (no `:`, no leading `/`); allow-list **ssh/password/vault/git**; **X-Content-Type-Options** + **X-Frame-Options** on responses |
+| **Quality** | Truncated job output could split UTF-8 | Truncate on **char boundary**; empty `ANSIBLE_UI_KEYFILE` falls back to default path |
 
 ---
 

@@ -8,7 +8,7 @@ use crate::schemas::*;
 use crate::secrets;
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -16,13 +16,14 @@ use axum::{
 #[cfg(feature = "embedded-static")]
 use axum::{
     body::Body,
-    http::{header, Method, Uri},
+    http::{header as http_header, Method, Uri},
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[cfg(feature = "embedded-static")]
 #[derive(rust_embed::RustEmbed)]
@@ -72,6 +73,31 @@ fn api_err(status: StatusCode, detail: &str) -> Response {
     (status, Json(serde_json::json!({ "detail": detail }))).into_response()
 }
 
+/// Allowed `credentials.kind` values (server-side; prevents odd kinds reaching runners / UI).
+fn credential_kind_ok(kind: &str) -> bool {
+    matches!(kind, "ssh" | "password" | "vault" | "git")
+}
+
+/// rust_embed keys must be relative, single-file paths (no `..`, no absolute).
+#[cfg(feature = "embedded-static")]
+fn safe_embedded_asset_path(path: &str) -> bool {
+    let p = path.trim();
+    if p.is_empty() {
+        return false;
+    }
+    if p.contains("..") {
+        return false;
+    }
+    if p.starts_with('/') || p.starts_with('\\') {
+        return false;
+    }
+    // Windows drive letters / URL-style schemes in path keys
+    if p.contains(':') {
+        return false;
+    }
+    true
+}
+
 async fn serve_index(State(state): State<AppState>) -> Response {
     if let Some(dir) = &state.static_dir {
         let path = dir.join("index.html");
@@ -99,7 +125,7 @@ async fn serve_index(State(state): State<AppState>) -> Response {
 
 #[cfg(feature = "embedded-static")]
 fn embedded_file_response(path: &str) -> Response {
-    if path.contains("..") {
+    if !safe_embedded_asset_path(path) {
         return (StatusCode::FORBIDDEN, "invalid path").into_response();
     }
     match EmbeddedStatic::get(path) {
@@ -107,7 +133,7 @@ fn embedded_file_response(path: &str) -> Response {
             let mime = mime_for_path(path);
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
+                .header(http_header::CONTENT_TYPE, mime)
                 .body(Body::from(f.data.into_owned()))
                 .unwrap()
                 .into_response()
@@ -127,21 +153,21 @@ async fn serve_embedded_fallback(uri: Uri, method: Method) -> Response {
         return (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response();
     }
     let p = uri.path().trim_start_matches('/').trim_end_matches('/');
-    if p.contains("..") {
+    if !safe_embedded_asset_path(p) {
         return (StatusCode::FORBIDDEN, "invalid path").into_response();
     }
     if p.starts_with("api") {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     if p.is_empty() {
-        return (StatusCode::FOUND, [(header::LOCATION, "/")]).into_response();
+        return (StatusCode::FOUND, [(http_header::LOCATION, "/")]).into_response();
     }
     match EmbeddedStatic::get(p) {
         Some(f) => {
             let mime = mime_for_path(p);
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
+                .header(http_header::CONTENT_TYPE, mime)
                 .body(Body::from(f.data.into_owned()))
                 .unwrap()
                 .into_response()
@@ -310,11 +336,35 @@ async fn create_credential(State(state): State<AppState>, Json(data): Json<Crede
     if crud::get_project(&state.db, data.project_id).is_none() {
         return Err(api_err(StatusCode::NOT_FOUND, "Project not found"));
     }
+    let kind_owned = data
+        .kind
+        .clone()
+        .unwrap_or_else(|| "ssh".to_string())
+        .trim()
+        .to_string();
+    if !credential_kind_ok(&kind_owned) {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Invalid credential kind. Use: ssh, password, vault, git.",
+        ));
+    }
+    let mut data = data;
+    data.kind = Some(kind_owned);
     let enc = secrets::encrypt_secret(&data.secret);
     crud::create_credential(&state.db, &data, &enc).map(Json).map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create credential"))
 }
 
-async fn update_credential(State(state): State<AppState>, Path(id): Path<i64>, Json(data): Json<CredentialUpdate>) -> Result<Json<CredentialRead>, Response> {
+async fn update_credential(State(state): State<AppState>, Path(id): Path<i64>, Json(mut data): Json<CredentialUpdate>) -> Result<Json<CredentialRead>, Response> {
+    if let Some(ref k) = data.kind {
+        let t = k.trim();
+        if !credential_kind_ok(t) {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Invalid credential kind. Use: ssh, password, vault, git.",
+            ));
+        }
+        data.kind = Some(t.to_string());
+    }
     let secret_encrypted = data.secret.as_ref().map(|s| secrets::encrypt_secret(s));
     crud::update_credential(&state.db, id, &data, secret_encrypted.as_deref()).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Credential not found")).map(Json)
 }
@@ -351,6 +401,7 @@ async fn get_next_run(State(state): State<AppState>, Path(id): Path<i64>) -> Res
 }
 
 async fn create_job_template(State(state): State<AppState>, Json(data): Json<JobTemplateCreate>) -> Result<Json<JobTemplateRead>, Response> {
+    validate_schedule_fields(data.schedule_cron.as_ref(), data.schedule_tz.as_ref())?;
     if crud::get_project(&state.db, data.project_id).is_none() {
         return Err(api_err(StatusCode::NOT_FOUND, "Project not found"));
     }
@@ -370,6 +421,7 @@ async fn create_job_template(State(state): State<AppState>, Json(data): Json<Job
 }
 
 async fn update_job_template(State(state): State<AppState>, Path(id): Path<i64>, Json(data): Json<JobTemplateUpdate>) -> Result<Json<JobTemplateRead>, Response> {
+    validate_schedule_fields(data.schedule_cron.as_ref(), data.schedule_tz.as_ref())?;
     let jt = crud::get_job_template(&state.db, id).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Job template not found"))?;
     if let Some(cid) = data.credential_id.or(jt.credential_id) {
         let cred = crud::get_credential(&state.db, cid).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Credential not found"))?;
@@ -629,6 +681,31 @@ fn api_routes(state: AppState) -> Router<AppState> {
 }
 
 const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SCHEDULE_CRON_LEN: usize = 256;
+const MAX_SCHEDULE_TZ_LEN: usize = 64;
+
+fn validate_schedule_fields(
+    cron: Option<&String>,
+    tz: Option<&String>,
+) -> Result<(), Response> {
+    if let Some(c) = cron {
+        if c.len() > MAX_SCHEDULE_CRON_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "schedule_cron is too long.",
+            ));
+        }
+    }
+    if let Some(t) = tz {
+        if t.len() > MAX_SCHEDULE_TZ_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "schedule_tz is too long.",
+            ));
+        }
+    }
+    Ok(())
+}
 
 pub fn app(source: StaticSource, db: DbPool) -> Router {
     let cors = cors_layer();
@@ -645,6 +722,14 @@ pub fn app(source: StaticSource, db: DbPool) -> Router {
                 .route("/static/{*path}", get(serve_embedded_static))
                 .nest("/api", api)
                 .layer(RequestBodyLimitLayer::new(BODY_LIMIT_BYTES))
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                ))
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::X_FRAME_OPTIONS,
+                    HeaderValue::from_static("SAMEORIGIN"),
+                ))
                 .layer(cors)
                 .with_state(state)
                 .fallback(get(serve_embedded_fallback))
@@ -661,6 +746,14 @@ pub fn app(source: StaticSource, db: DbPool) -> Router {
                 .nest_service("/static", static_service.clone())
                 .nest("/api", api)
                 .layer(RequestBodyLimitLayer::new(BODY_LIMIT_BYTES))
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::X_CONTENT_TYPE_OPTIONS,
+                    HeaderValue::from_static("nosniff"),
+                ))
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::X_FRAME_OPTIONS,
+                    HeaderValue::from_static("SAMEORIGIN"),
+                ))
                 .layer(cors)
                 .with_state(state)
                 .fallback_service(static_service)

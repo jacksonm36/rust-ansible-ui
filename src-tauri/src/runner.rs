@@ -16,11 +16,14 @@ const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const TRUNCATE_SUFFIX: &str = "\n\n[Output truncated: exceeded 2 MB limit]";
 
 fn truncate_output(out: &str) -> String {
-    let bytes = out.as_bytes();
-    if bytes.len() <= MAX_OUTPUT_BYTES {
+    if out.len() <= MAX_OUTPUT_BYTES {
         return out.to_string();
     }
-    let mut s = String::from_utf8_lossy(&bytes[..MAX_OUTPUT_BYTES]).into_owned();
+    let mut end = MAX_OUTPUT_BYTES;
+    while end > 0 && !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = String::from_utf8_lossy(out.as_bytes().get(..end).unwrap_or_default()).into_owned();
     s.push_str(TRUNCATE_SUFFIX);
     s
 }

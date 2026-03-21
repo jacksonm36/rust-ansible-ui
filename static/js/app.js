@@ -386,7 +386,7 @@ qs('#modal-overlay').onclick = (e) => { if (e.target === e.currentTarget) closeM
 function openProjectModal(id) {
   const p = id ? projects.find(x => x.id === id) : null;
   const credOptions = p
-    ? credentials.filter(c => (c.kind === 'ssh' || c.kind === 'git') && c.project_id === p.id).map(c => `<option value="${c.id}" ${p.git_credential_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)} (${c.kind})</option>`).join('')
+    ? credentials.filter(c => (c.kind === 'ssh' || c.kind === 'git') && c.project_id === p.id).map(c => `<option value="${c.id}" ${p.git_credential_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)} (${escapeHtml(c.kind)})</option>`).join('')
     : '';
   showModal(
     p ? 'Edit Project' : 'New Project',
