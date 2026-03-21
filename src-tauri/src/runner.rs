@@ -62,6 +62,50 @@ fn inventory_temp_suffix(content: &str) -> &'static str {
     ".ini"
 }
 
+/// YAML single-quoted scalar (`'` → `''`). Safe for passwords (no `$` / escape surprises).
+fn yaml_single_quoted_scalar(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Extra vars from SSH password + optional credential `extra` (e.g. `ansible_user: root`).
+fn build_credential_extra_vars_yaml(ssh_password: Option<&str>, credential_extra: &str) -> Option<String> {
+    let extra = credential_extra.trim();
+    let mut body = String::new();
+    if let Some(pass) = ssh_password {
+        let q = yaml_single_quoted_scalar(pass.trim());
+        body.push_str("ansible_ssh_pass: ");
+        body.push_str(&q);
+        body.push('\n');
+        body.push_str("ansible_password: ");
+        body.push_str(&q);
+        body.push('\n');
+    }
+    if !extra.is_empty() {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(extra);
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
 const SCRIPT_EXTENSIONS: &[(&str, &[&str])] = &[
     (".sh", &["bash"]),
     (".bash", &["bash"]),
@@ -228,6 +272,7 @@ pub fn run_playbook(
     credential_ssh_key: Option<&str>,
     credential_ssh_password: Option<&str>,
     credential_vault_password: Option<&str>,
+    credential_extra: &str,
 ) -> (String, String) {
     let _ = crud::update_job_status(db, job_id, "running", "");
 
@@ -274,6 +319,24 @@ pub fn run_playbook(
         "-i".into(),
         inv.path().to_string_lossy().to_string(),
     ];
+
+    // Credential vars first; job-template extra_vars second (overrides on duplicate keys).
+    if let Some(yaml) = build_credential_extra_vars_yaml(credential_ssh_password, credential_extra) {
+        if let Ok(f) = NamedTempFile::with_suffix(".yml") {
+            if std::fs::write(f.path(), yaml).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok();
+                }
+                let path_str = format!("@{}", f.path().display());
+                _extra_vars_file = Some(f);
+                args.push("-e".into());
+                args.push(path_str);
+            }
+        }
+    }
+
     if !extra_vars.trim().is_empty() {
         args.push("-e".into());
         args.push(extra_vars.trim().to_string());
@@ -317,26 +380,16 @@ pub fn run_playbook(
         }
     }
 
-    if let Some(pass) = credential_ssh_password {
-        let yaml = format!("ansible_ssh_pass: {:?}\nansible_password: {:?}\n", pass, pass);
-        if let Ok(f) = NamedTempFile::with_suffix(".yml") {
-            if std::fs::write(f.path(), yaml).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o600)).ok();
-                }
-                let path_str = format!("@{}", f.path().display());
-                _extra_vars_file = Some(f);
-                args.push("-e".into());
-                args.push(path_str);
-            }
-        }
-    }
-
     let cwd = playbook_abs.parent().unwrap_or(Path::new("."));
     let mut cmd = Command::new("ansible-playbook");
     cmd.args(&args).current_dir(cwd);
+    if let Ok(u) = std::env::var("ANSIBLE_UI_REMOTE_USER") {
+        let u = u.trim();
+        if !u.is_empty() {
+            // Default remote user when inventory omits ansible_user (systemd runs as ansible-ui).
+            cmd.env("ANSIBLE_REMOTE_USER", u);
+        }
+    }
     let host_key_check =
         std::env::var("ANSIBLE_HOST_KEY_CHECKING").unwrap_or_else(|_| "False".into());
     cmd.env("ANSIBLE_HOST_KEY_CHECKING", &host_key_check);

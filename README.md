@@ -59,11 +59,14 @@ Create a `.env` file in the folder where you run the server, or set variables in
 | `DATABASE_URL` | SQLite path. Default: `./data/ansible_ui.db`. Example: `DATABASE_URL=sqlite:///C:/path/to/ansible_ui.db` |
 | `ANSIBLE_UI_WORKSPACE` | **Optional:** directory for git clones (`project_<id>`). Default: `<parent of DB file>/workspace` when `DATABASE_URL` is set, else `<cwd>/workspace`. |
 | `ANSIBLE_HOST_KEY_CHECKING` | `True` / `False` — passed to Ansible (default `False` if unset). |
+| `ANSIBLE_UI_REMOTE_USER` | **Optional:** sets Ansible’s default SSH user (`ANSIBLE_REMOTE_USER`). Use when the service runs as a dedicated account (e.g. `ansible-ui`) but targets should be reached as `root` or `ubuntu`. Inventory `ansible_user` per host still overrides. |
 | `ANSIBLE_UI_BIND` | Listen address, e.g. `0.0.0.0:14300` (all interfaces) or `127.0.0.1:14300` (default). |
 | `ANSIBLE_UI_EXTRA_ORIGINS` | Comma-separated CORS origins if you open the UI from another host/port (e.g. `http://192.168.1.10:14300`). |
 | `ANSIBLE_UI_RELAX_CORS` | If `1` or `true`, allow **any** `Origin` (for LAN / reverse-proxy setups). **Insecure on public networks** — use a firewall. The Linux install script sets this when nginx/lighttpd is enabled. |
 | `ANSIBLE_UI_SCRIPT_TIMEOUT_SECS` | Max seconds for **script** templates (default `3600`); process is killed afterward. |
 | `ANSIBLE_UI_PLAYBOOK_TIMEOUT_SECS` | Max seconds for **ansible-playbook** (default `3600`). Falls back to `ANSIBLE_UI_JOB_TIMEOUT_SECS` if unset. |
+
+**SSH from the server (systemd):** Jobs run as the service user (`ansible-ui`), not as you on the shell. Ansible’s default remote user is that same account unless you set **`ansible_user`** in the inventory (YAML/INI) or under **Credentials → Extra** (e.g. `ansible_user: root`). You can also set **`ANSIBLE_UI_REMOTE_USER`** on the service for a global default. For **SSH password** credentials, install **`sshpass`** on the server (`apt install sshpass`) so Ansible can log in non-interactively.
 
 ### 4. Run the app
 

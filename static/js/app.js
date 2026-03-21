@@ -499,6 +499,11 @@ function openCredentialModal(id) {
         <label>Secret</label>
         <textarea id="modal-secret" placeholder="${c ? 'Leave blank to keep existing' : 'Paste private key, password, or token'}">${c ? '' : ''}</textarea>
       </div>
+      <div class="form-group">
+        <label>Extra (optional YAML)</label>
+        <textarea id="modal-cred-extra" placeholder="e.g. ansible_user: root&#10;ansible_ssh_common_args: '-o PreferredAuthentications=password'">${c ? escapeHtml(c.extra || '') : ''}</textarea>
+        <small class="text-muted">SSH jobs run as the <strong>service account</strong> (e.g. ansible-ui) unless you set <code>ansible_user</code> here or in inventory.</small>
+      </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
      <button class="btn btn-primary" id="modal-save-cred" data-id="${id || ''}">Save</button>`
@@ -514,10 +519,10 @@ function openCredentialModal(id) {
     if (!id && !secret) { alert('Secret is required for new credential'); return; }
     try {
       if (id) {
-        const body = { name, kind };
+        const body = { name, kind, extra: qs('#modal-cred-extra').value };
         if (secret) body.secret = secret;
         await fetchJSON(`${API}/credentials/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
-      } else await fetchJSON(`${API}/credentials`, { method: 'POST', body: JSON.stringify({ project_id, name, kind, secret: secret || 'x', extra: '' }) });
+      } else await fetchJSON(`${API}/credentials`, { method: 'POST', body: JSON.stringify({ project_id, name, kind, secret: secret || 'x', extra: qs('#modal-cred-extra').value }) });
       closeModal();
       reloadAndRender();
     } catch (e) { showError(e); }

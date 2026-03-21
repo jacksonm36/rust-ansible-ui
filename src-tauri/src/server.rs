@@ -473,7 +473,18 @@ fn resolve_playbook_and_creds(
     jt: &JobTemplateRead,
     inv_content: &str,
     extra: &str,
-) -> Result<(String, String, String, Option<String>, Option<String>, Option<String>), String> {
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ),
+    String,
+> {
     let project = crud::get_project(db, jt.project_id).ok_or("Project not found")?;
     let mut playbook_path = jt.playbook_path.clone();
     let inv_content = inv_content.to_string();
@@ -533,11 +544,13 @@ fn resolve_playbook_and_creds(
     let mut ssh_key = None;
     let mut ssh_password = None;
     let mut vault_pass = None;
+    let mut credential_extra = String::new();
     if let Some(cred_id) = jt.credential_id {
         if let Some(cred) = crud::get_credential(db, cred_id) {
             if cred.project_id != jt.project_id {
                 return Err("Credential does not belong to this project.".into());
             }
+            credential_extra = cred.extra.clone();
             if let Some(secret) = crud::get_credential_secret(db, cred_id) {
                 match cred.kind.as_str() {
                     "ssh" => ssh_key = Some(secret),
@@ -549,7 +562,15 @@ fn resolve_playbook_and_creds(
         }
     }
 
-    Ok((playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass))
+    Ok((
+        playbook_path,
+        inv_content,
+        extra,
+        ssh_key,
+        ssh_password,
+        vault_pass,
+        credential_extra,
+    ))
 }
 
 pub fn launch_job_template_by_id_impl(db: &DbPool, job_template_id: i64) -> Option<impl FnOnce() + Send> {
@@ -559,7 +580,8 @@ pub fn launch_job_template_by_id_impl(db: &DbPool, job_template_id: i64) -> Opti
         .map(|i| i.content)
         .unwrap_or_default();
     let extra = jt.extra_vars.clone();
-    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass) = resolve_playbook_and_creds(db, &jt, &inv_content, &extra).ok()?;
+    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass, credential_extra) =
+        resolve_playbook_and_creds(db, &jt, &inv_content, &extra).ok()?;
     let job = crud::create_job(db, jt.project_id, Some(jt.id), &playbook_path, &inv_content, &extra, "pending").ok()?;
     let job_id = job.id;
     let db2 = db.clone();
@@ -573,6 +595,7 @@ pub fn launch_job_template_by_id_impl(db: &DbPool, job_template_id: i64) -> Opti
             ssh_key.as_deref(),
             ssh_password.as_deref(),
             vault_pass.as_deref(),
+            &credential_extra,
         );
     })
 }
@@ -584,8 +607,8 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
         .map(|i| i.content)
         .unwrap_or_default();
     let extra = data.extra_vars_override.as_ref().filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| jt.extra_vars.clone());
-    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass) = resolve_playbook_and_creds(&state.db, &jt, &inv_content, &extra)
-        .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass, credential_extra) =
+        resolve_playbook_and_creds(&state.db, &jt, &inv_content, &extra).map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
     let job = crud::create_job(&state.db, jt.project_id, Some(jt.id), &playbook_path, &inv_content, &extra, "pending")
         .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job"))?;
     let job_id = job.id;
@@ -593,6 +616,7 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
     let playbook_path2 = playbook_path.clone();
     let inv_content2 = inv_content.clone();
     let extra2 = extra.clone();
+    let credential_extra2 = credential_extra.clone();
     std::thread::spawn(move || {
         let _ = runner::run_playbook(
             &db_clone,
@@ -603,6 +627,7 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
             ssh_key.as_deref(),
             ssh_password.as_deref(),
             vault_pass.as_deref(),
+            &credential_extra2,
         );
     });
     crud::get_job(&state.db, job.id).map(Json).ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Job not found"))

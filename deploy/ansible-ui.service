@@ -11,6 +11,8 @@ WorkingDirectory=/var/lib/ansible-ui
 # Overridden to 127.0.0.1:14300 when install-linux.sh installs nginx/lighttpd (see service.d/50-proxy.conf).
 Environment=ANSIBLE_UI_BIND=0.0.0.0:14300
 Environment=DATABASE_URL=sqlite:///var/lib/ansible-ui/ansible_ui.db
+# Optional: default SSH user when inventory omits ansible_user (service user is ansible-ui).
+# Environment=ANSIBLE_UI_REMOTE_USER=root
 # Optional: set ANSIBLE_UI_SECRET_KEY (32+ byte prefix used as AES key). If unset, the server
 # uses /var/lib/ansible-ui/ansible_ui_secret.key (auto-generated on first run). Back up that file.
 # Environment=ANSIBLE_UI_SECRET_KEY=your-long-random-secret-here

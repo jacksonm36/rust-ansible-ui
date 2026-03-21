@@ -44,14 +44,14 @@ if command -v apt-get >/dev/null 2>&1; then
   info "Installing packages (apt)…"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq build-essential pkg-config libssl-dev curl git ansible-core || \
-    apt-get install -y -qq build-essential pkg-config libssl-dev curl git ansible || true
+  apt-get install -y -qq build-essential pkg-config libssl-dev curl git sshpass ansible-core || \
+    apt-get install -y -qq build-essential pkg-config libssl-dev curl git sshpass ansible || true
 elif command -v dnf >/dev/null 2>&1; then
   info "Installing packages (dnf)…"
-  dnf install -y gcc gcc-c++ make pkg-config openssl-devel curl git ansible || true
+  dnf install -y gcc gcc-c++ make pkg-config openssl-devel curl git sshpass ansible || true
 elif command -v pacman >/dev/null 2>&1; then
   info "Installing packages (pacman)…"
-  pacman -Sy --noconfirm base-devel pkgconf openssl curl git ansible || true
+  pacman -Sy --noconfirm base-devel pkgconf openssl curl git sshpass ansible || true
 else
   warn "Unknown package manager; install manually: gcc, make, pkg-config, openssl dev, curl, git, ansible"
 fi
