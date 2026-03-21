@@ -351,7 +351,7 @@ function upsertAnsibleUser(extra, user) {
   return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
-function upsertSudoConfig(extra, becomeUser) {
+function upsertSudoConfig(extra, becomeUser, sshUser) {
   const lines = ((extra || '').replace(/\r\n/g, '\n')).split('\n');
   const out = [];
   for (const line of lines) {
@@ -362,7 +362,10 @@ function upsertSudoConfig(extra, becomeUser) {
   }
   out.unshift('ansible_become_method: sudo');
   out.unshift('ansible_become: true');
-  const bUser = (becomeUser || '').trim();
+  let bUser = (becomeUser || '').trim();
+  const sUser = (sshUser || '').trim().toLowerCase();
+  // Common case: SSH as non-root, escalate to root.
+  if (!bUser && sUser && sUser !== 'root') bUser = 'root';
   if (bUser) out.unshift(`ansible_become_user: ${bUser}`);
   return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
@@ -580,12 +583,17 @@ function openCredentialModal(id) {
   const sel = qs('#modal-cred-project');
   const sshUserInput = qs('#modal-ssh-user');
   const extraInput = qs('#modal-cred-extra');
+  const sudoUserInput = qs('#modal-sudo-user');
   qs('#modal-apply-ssh-user').onclick = () => {
     extraInput.value = upsertAnsibleUser(extraInput.value, sshUserInput.value);
   };
   qs('#modal-apply-sudo').onclick = () => {
-    const sudoUser = qs('#modal-sudo-user').value;
-    extraInput.value = upsertSudoConfig(extraInput.value, sudoUser);
+    let sudoUser = sudoUserInput.value;
+    if (!sudoUser.trim() && sshUserInput.value.trim() && sshUserInput.value.trim().toLowerCase() !== 'root') {
+      sudoUser = 'root';
+      sudoUserInput.value = 'root';
+    }
+    extraInput.value = upsertSudoConfig(extraInput.value, sudoUser, sshUserInput.value);
   };
   if (!c && projects[0]) sel.value = projects[0].id;
   qs('#modal-save-cred').onclick = async () => {
