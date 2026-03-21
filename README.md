@@ -66,7 +66,7 @@ Create a `.env` file in the folder where you run the server, or set variables in
 | `ANSIBLE_UI_SCRIPT_TIMEOUT_SECS` | Max seconds for **script** templates (default `3600`); process is killed afterward. |
 | `ANSIBLE_UI_PLAYBOOK_TIMEOUT_SECS` | Max seconds for **ansible-playbook** (default `3600`). Falls back to `ANSIBLE_UI_JOB_TIMEOUT_SECS` if unset. |
 
-**SSH from the server (systemd):** Jobs run as the service user (`ansible-ui`), not as you on the shell. Ansible’s default remote user is that same account unless you set **`ansible_user`** in the inventory (YAML/INI) or under **Credentials → Extra** (e.g. `ansible_user: root`). You can also set **`ANSIBLE_UI_REMOTE_USER`** on the service for a global default. For **SSH password** credentials, install **`sshpass`** on the server (`apt install sshpass`) so Ansible can log in non-interactively. The runner normalizes inventory/credential text (CRLF, BOM, stray spaces) so pasted Windows/Web content does not produce errors like *hostname contains invalid characters*.
+**SSH from the server (systemd):** Jobs run as the service user (`ansible-ui`), not as you on the shell. Ansible’s default remote user is that same account unless you set **`ansible_user`** in the inventory (YAML/INI) or under **Credentials → Extra** (e.g. `ansible_user: root`). You can also set **`ANSIBLE_UI_REMOTE_USER`** on the service for a global default. For **SSH password** credentials, install **`sshpass`** on the server (`apt install sshpass`) so Ansible can log in non-interactively. The runner normalizes inventory, credential extra, and job-template extra vars (CRLF, BOM, stray spaces, zero-width/bidi Unicode) so pasted Windows/Web content does not produce errors like *hostname contains invalid characters*.
 
 ### 4. Run the app
 

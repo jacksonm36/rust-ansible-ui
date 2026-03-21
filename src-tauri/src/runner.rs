@@ -62,7 +62,25 @@ fn inventory_temp_suffix(content: &str) -> &'static str {
     ".ini"
 }
 
-/// CRLF/BOM/NUL and trailing spaces (common after Windows/Web copy-paste) break OpenSSH hostnames.
+/// Allow char in inventory / extra-vars text (drop invisibles that break OpenSSH host parsing).
+fn ansible_text_char_ok(c: char) -> bool {
+    match c {
+        '\0' => false,
+        // CRLF handled before this pass; drop other ASCII controls except newline/tab (YAML indent)
+        c if c.is_ascii_control() && c != '\n' && c != '\t' => false,
+        '\u{00ad}' | '\u{034f}' | '\u{061c}' => false, // soft hyphen, CGJ, ALM
+        '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180e}' => false,
+        '\u{200b}'..='\u{200f}' => false, // ZWSP, ZWNJ, ZWJ, marks
+        '\u{202a}'..='\u{202e}' => false, // bidi embedding overrides
+        '\u{2060}'..='\u{2064}' => false, // word joiner, invisible ops
+        '\u{2066}'..='\u{2069}' => false, // isolate pops
+        '\u{feff}' => false,
+        '\u{fff0}'..='\u{fff8}' => false,
+        _ => true,
+    }
+}
+
+/// CRLF/BOM/NUL, trailing spaces, and invisible Unicode (common after Windows/Web copy-paste) break OpenSSH hostnames.
 fn normalize_ansible_text(s: &str) -> String {
     let s = s.trim_start_matches('\u{feff}');
     let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
@@ -72,7 +90,7 @@ fn normalize_ansible_text(s: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         .chars()
-        .filter(|&c| c != '\0')
+        .filter(|&c| ansible_text_char_ok(c))
         .collect()
 }
 
@@ -252,6 +270,7 @@ fn run_script(script_path: &str, extra_vars: &str, timeout_secs: u64) -> (i32, S
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
+    let extra_vars = normalize_ansible_text(extra_vars.trim());
     for line in extra_vars.lines() {
         let line = line.trim();
         if line.contains('=') && !line.starts_with('#') {
@@ -359,9 +378,10 @@ pub fn run_playbook(
         }
     }
 
-    if !extra_vars.trim().is_empty() {
+    let extra_norm = normalize_ansible_text(extra_vars.trim());
+    if !extra_norm.is_empty() {
         args.push("-e".into());
-        args.push(extra_vars.trim().to_string());
+        args.push(extra_norm);
     }
 
     if let Some(key) = credential_ssh_key {
