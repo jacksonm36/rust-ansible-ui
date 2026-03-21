@@ -28,6 +28,40 @@ fn truncate_output(out: &str) -> String {
     s
 }
 
+/// Ansible picks the inventory plugin from the temp file suffix. YAML content (e.g. `all:` /
+/// `hosts:`) must use `.yaml`, or the INI plugin runs and fails with "Invalid host pattern 'all:'".
+fn inventory_temp_suffix(content: &str) -> &'static str {
+    let s = content.trim_start();
+    if s.starts_with('[') {
+        return ".ini";
+    }
+    if s.starts_with("---") {
+        return ".yaml";
+    }
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with('[') && t.ends_with(']') {
+            return ".ini";
+        }
+        // INI host line: `name key=value` or `[group]`
+        if t.contains('=') {
+            return ".ini";
+        }
+        if t == "all:" || t == "ungrouped:" || t.starts_with("plugin:") {
+            return ".yaml";
+        }
+        // YAML group header (`webservers:`) before `hosts:` / `children:`
+        if t.ends_with(':') {
+            return ".yaml";
+        }
+        break;
+    }
+    ".ini"
+}
+
 const SCRIPT_EXTENSIONS: &[(&str, &[&str])] = &[
     (".sh", &["bash"]),
     (".bash", &["bash"]),
@@ -220,7 +254,8 @@ pub fn run_playbook(
         inventory_content.to_string()
     };
 
-    let inv = match NamedTempFile::with_suffix(".ini") {
+    let inv_suffix = inventory_temp_suffix(&inv_content);
+    let inv = match NamedTempFile::with_suffix(inv_suffix) {
         Ok(f) => f,
         Err(e) => {
             let msg = format!("Failed to create temporary inventory file: {}", e);

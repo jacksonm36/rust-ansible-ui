@@ -6,7 +6,7 @@ A **desktop** version of the [vibe-coded](https://github.com/jacksonm36/vibe-cod
 
 - **Projects** – Organize playbooks and inventories by project  
 - **Git / GitHub** – Clone playbooks from any repo; use **Pull** to sync  
-- **Inventories** – Store INI/YAML inventories in SQLite  
+- **Inventories** – Store INI or YAML inventories in SQLite; the runner writes a temp file with the right extension so Ansible uses the correct parser  
 - **Credentials** – Encrypted in DB: SSH key, SSH password, Ansible Vault, Git HTTPS token  
 - **Job templates** – Playbook + inventory + credentials; launch and view logs  
 - **Job history** – Status, duration, and full output for every run  
