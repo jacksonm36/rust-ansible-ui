@@ -62,6 +62,28 @@ fn inventory_temp_suffix(content: &str) -> &'static str {
     ".ini"
 }
 
+/// CRLF/BOM/NUL and trailing spaces (common after Windows/Web copy-paste) break OpenSSH hostnames.
+fn normalize_ansible_text(s: &str) -> String {
+    let s = s.trim_start_matches('\u{feff}');
+    let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .filter(|&c| c != '\0')
+        .collect()
+}
+
+fn sanitize_inventory_content(s: &str) -> String {
+    let mut out = normalize_ansible_text(s);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// YAML single-quoted scalar (`'` → `''`). Safe for passwords (no `$` / escape surprises).
 fn yaml_single_quoted_scalar(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -79,7 +101,7 @@ fn yaml_single_quoted_scalar(s: &str) -> String {
 
 /// Extra vars from SSH password + optional credential `extra` (e.g. `ansible_user: root`).
 fn build_credential_extra_vars_yaml(ssh_password: Option<&str>, credential_extra: &str) -> Option<String> {
-    let extra = credential_extra.trim();
+    let extra = normalize_ansible_text(credential_extra.trim());
     let mut body = String::new();
     if let Some(pass) = ssh_password {
         let q = yaml_single_quoted_scalar(pass.trim());
@@ -94,7 +116,7 @@ fn build_credential_extra_vars_yaml(ssh_password: Option<&str>, credential_extra
         if !body.is_empty() {
             body.push('\n');
         }
-        body.push_str(extra);
+        body.push_str(&extra);
         if !body.ends_with('\n') {
             body.push('\n');
         }
@@ -296,7 +318,7 @@ pub fn run_playbook(
     let inv_content = if inventory_content.is_empty() {
         "[all]\nlocalhost ansible_connection=local\n".to_string()
     } else {
-        inventory_content.to_string()
+        sanitize_inventory_content(inventory_content)
     };
 
     let inv_suffix = inventory_temp_suffix(&inv_content);
