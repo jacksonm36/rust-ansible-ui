@@ -35,6 +35,7 @@ let jobs = [];
 const REFRESH_INTERVAL_MS = 4000;
 let refreshIntervalId = null;
 let jobPollIntervalId = null;
+let refreshBusy = false;
 
 function clearRefresh() {
   if (refreshIntervalId) {
@@ -46,11 +47,16 @@ function clearRefresh() {
 function startRefresh() {
   clearRefresh();
   refreshIntervalId = setInterval(async () => {
+    if (refreshBusy) return;
+    if (jobPollIntervalId) return; // Job modal already polls aggressively
+    refreshBusy = true;
     try {
-      await loadAll();
+      await loadForPage(currentPage);
       render();
     } catch (err) {
       console.error('Auto-refresh:', err);
+    } finally {
+      refreshBusy = false;
     }
   }, REFRESH_INTERVAL_MS);
 }
@@ -65,6 +71,7 @@ function setPage(page) {
   // Auto-refresh on all main pages so project/credential/template changes
   // and job status updates appear without manual reload.
   startRefresh();
+  reloadAndRender().catch(console.error);
 }
 
 function render() {
@@ -875,23 +882,40 @@ function viewJob(id) {
   }).catch(e => showError(e));
 }
 
-async function loadAll() {
+async function loadForPage(page = currentPage) {
   try {
-    projects = await fetchJSON(`${API}/projects`);
-    inventories = [];
-    credentials = [];
-    jobTemplates = [];
-    for (const p of projects) {
-      const [invList, credList, tplList] = await Promise.all([
-        fetchJSON(`${API}/inventories?project_id=${p.id}`),
-        fetchJSON(`${API}/credentials?project_id=${p.id}`),
-        fetchJSON(`${API}/job_templates?project_id=${p.id}`),
-      ]);
-      inventories.push(...invList);
-      credentials.push(...credList);
-      jobTemplates.push(...tplList);
+    if (page === 'jobs') {
+      jobs = await fetchJSON(`${API}/jobs?limit=100`);
+      return;
     }
-    jobs = await fetchJSON(`${API}/jobs?limit=100`);
+
+    projects = await fetchJSON(`${API}/projects`);
+
+    // Keep arrays fresh only for pages that need them.
+    if (page === 'dashboard' || page === 'templates') {
+      jobTemplates = [];
+      for (const p of projects) {
+        const tplList = await fetchJSON(`${API}/job_templates?project_id=${p.id}`);
+        jobTemplates.push(...tplList);
+      }
+    }
+    if (page === 'inventories' || page === 'templates') {
+      inventories = [];
+      for (const p of projects) {
+        const invList = await fetchJSON(`${API}/inventories?project_id=${p.id}`);
+        inventories.push(...invList);
+      }
+    }
+    if (page === 'credentials' || page === 'templates' || page === 'projects') {
+      credentials = [];
+      for (const p of projects) {
+        const credList = await fetchJSON(`${API}/credentials?project_id=${p.id}`);
+        credentials.push(...credList);
+      }
+    }
+    if (page === 'dashboard') {
+      jobs = await fetchJSON(`${API}/jobs?limit=100`);
+    }
   } catch (e) {
     console.error(e);
     // Keep existing data so one failed poll doesn't wipe the UI
@@ -899,7 +923,7 @@ async function loadAll() {
 }
 
 async function reloadAndRender() {
-  await loadAll();
+  await loadForPage(currentPage);
   render();
 }
 
