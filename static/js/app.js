@@ -351,6 +351,17 @@ function upsertAnsibleUser(extra, user) {
   return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
+function looksLikePublicKey(secret) {
+  const s = (secret || '').trim();
+  if (!s) return false;
+  return /^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\s+/i.test(s);
+}
+
+function looksLikePrivateKey(secret) {
+  const s = (secret || '').trim();
+  return /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/i.test(s);
+}
+
 // Schedule builder: friendly object <-> cron (backend)
 // cron = "minute hour day month dow" (dow: 0=Sun, 1=Mon, ..., 6=Sat)
 function scheduleToCron(s) {
@@ -558,6 +569,10 @@ function openCredentialModal(id) {
     const mergedExtra = upsertAnsibleUser(extraInput.value, sshUserInput.value);
     if (!name || !project_id) return;
     if (!id && !secret) { alert('Secret is required for new credential'); return; }
+    if (kind === 'ssh' && secret && looksLikePublicKey(secret) && !looksLikePrivateKey(secret)) {
+      alert('This looks like an SSH public key (e.g. ssh-rsa ...). For SSH credentials, paste a PRIVATE key block (-----BEGIN ... PRIVATE KEY-----).');
+      return;
+    }
     try {
       if (id) {
         const body = { name, kind, extra: mergedExtra };
