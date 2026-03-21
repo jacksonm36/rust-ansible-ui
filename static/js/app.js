@@ -351,6 +351,22 @@ function upsertAnsibleUser(extra, user) {
   return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
+function upsertSudoConfig(extra, becomeUser) {
+  const lines = ((extra || '').replace(/\r\n/g, '\n')).split('\n');
+  const out = [];
+  for (const line of lines) {
+    if (/^\s*ansible_become\s*:/.test(line)) continue;
+    if (/^\s*ansible_become_method\s*:/.test(line)) continue;
+    if (/^\s*ansible_become_user\s*:/.test(line)) continue;
+    out.push(line);
+  }
+  out.unshift('ansible_become_method: sudo');
+  out.unshift('ansible_become: true');
+  const bUser = (becomeUser || '').trim();
+  if (bUser) out.unshift(`ansible_become_user: ${bUser}`);
+  return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
+}
+
 function looksLikePublicKey(secret) {
   const s = (secret || '').trim();
   if (!s) return false;
@@ -550,6 +566,13 @@ function openCredentialModal(id) {
           <button type="button" class="btn btn-sm btn-secondary" id="modal-apply-ssh-user">Use for SSH</button>
         </div>
       </div>
+      <div class="form-group">
+        <label>Sudo</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="modal-sudo-user" placeholder="optional become user (e.g. root)">
+          <button type="button" class="btn btn-sm btn-secondary" id="modal-apply-sudo">Use sudo</button>
+        </div>
+      </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
      <button class="btn btn-primary" id="modal-save-cred" data-id="${id || ''}">Save</button>`
@@ -559,6 +582,10 @@ function openCredentialModal(id) {
   const extraInput = qs('#modal-cred-extra');
   qs('#modal-apply-ssh-user').onclick = () => {
     extraInput.value = upsertAnsibleUser(extraInput.value, sshUserInput.value);
+  };
+  qs('#modal-apply-sudo').onclick = () => {
+    const sudoUser = qs('#modal-sudo-user').value;
+    extraInput.value = upsertSudoConfig(extraInput.value, sudoUser);
   };
   if (!c && projects[0]) sel.value = projects[0].id;
   qs('#modal-save-cred').onclick = async () => {
