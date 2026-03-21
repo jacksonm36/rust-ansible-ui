@@ -556,7 +556,33 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
     crud::get_job(&state.db, job.id).map(Json).ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Job not found"))
 }
 
+fn cors_relax_lan() -> bool {
+    matches!(
+        std::env::var("ANSIBLE_UI_RELAX_CORS").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 fn cors_layer() -> CorsLayer {
+    let methods = [
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PATCH,
+        axum::http::Method::DELETE,
+        axum::http::Method::OPTIONS,
+    ];
+    let headers = [axum::http::header::CONTENT_TYPE];
+
+    if cors_relax_lan() {
+        tracing::warn!(
+            "ANSIBLE_UI_RELAX_CORS is enabled: CORS allows any Origin. Use only on trusted networks or behind a firewall."
+        );
+        return CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods(methods)
+            .allow_headers(headers);
+    }
+
     let mut allowed_origins: Vec<HeaderValue> = [
         "http://127.0.0.1:14300",
         "http://localhost:14300",
@@ -579,14 +605,8 @@ fn cors_layer() -> CorsLayer {
     }
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed_origins))
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PATCH,
-            axum::http::Method::DELETE,
-            axum::http::Method::OPTIONS,
-        ])
-        .allow_headers([axum::http::header::CONTENT_TYPE])
+        .allow_methods(methods)
+        .allow_headers(headers)
 }
 
 /// API routes only (nested under `/api`).

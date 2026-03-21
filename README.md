@@ -60,6 +60,7 @@ Create a `.env` file in the folder where you run the server, or set variables in
 | `ANSIBLE_HOST_KEY_CHECKING` | `True` / `False` — passed to Ansible (default `False` if unset). |
 | `ANSIBLE_UI_BIND` | Listen address, e.g. `0.0.0.0:14300` (all interfaces) or `127.0.0.1:14300` (default). |
 | `ANSIBLE_UI_EXTRA_ORIGINS` | Comma-separated CORS origins if you open the UI from another host/port (e.g. `http://192.168.1.10:14300`). |
+| `ANSIBLE_UI_RELAX_CORS` | If `1` or `true`, allow **any** `Origin` (for LAN / reverse-proxy setups). **Insecure on public networks** — use a firewall. The Linux install script sets this when nginx/lighttpd is enabled. |
 | `ANSIBLE_UI_SCRIPT_TIMEOUT_SECS` | Max seconds for **script** templates (default `3600`); process is killed afterward. |
 | `ANSIBLE_UI_PLAYBOOK_TIMEOUT_SECS` | Max seconds for **ansible-playbook** (default `3600`). Falls back to `ANSIBLE_UI_JOB_TIMEOUT_SECS` if unset. |
 
@@ -100,13 +101,37 @@ If you browse from another machine, add CORS origins, e.g.:
 export ANSIBLE_UI_EXTRA_ORIGINS=http://192.168.1.5:14300
 ```
 
-**Linux: automated install + systemd**
+**Linux: automated install + systemd + reverse proxy (optional)**
 
 As **root**, from the cloned repo:
 
 ```bash
 sudo bash scripts/install-linux.sh
 ```
+
+By default this also installs **nginx** and configures **port 80 → `127.0.0.1:14300`**, so any PC on your LAN can open **`http://<server-ip>/`** without typing `:14300`. The app then listens only on **localhost:14300** behind the proxy; **`ANSIBLE_UI_RELAX_CORS=1`** is set so browser API calls from other machines work (still **use a firewall** — do not expose port 80 to the Internet without TLS and real auth).
+
+Environment variables for the installer:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `INSTALL_WEB_PROXY` | `nginx` | `nginx` — install nginx + site config; `lighttpd` — Debian/apt or Fedora/dnf lighttpd; `none` — no proxy, service listens **`0.0.0.0:14300`** (direct LAN access on 14300). |
+| `OPEN_FIREWALL_HTTP` | `1` | If `1`, tries **firewalld** (`http` service) and **ufw** (`80/tcp`) when a proxy is installed. |
+
+Examples:
+
+```bash
+# Default: nginx on port 80 + ansible-ui on 127.0.0.1:14300
+sudo bash scripts/install-linux.sh
+
+# Use lighttpd instead
+sudo INSTALL_WEB_PROXY=lighttpd bash scripts/install-linux.sh
+
+# No reverse proxy; reach the UI at http://SERVER:14300
+sudo INSTALL_WEB_PROXY=none bash scripts/install-linux.sh
+```
+
+Config templates (manual installs): `deploy/nginx/ansible-ui.conf`, `deploy/lighttpd/90-ansible-ui.conf`.
 
 This script will:
 
@@ -115,7 +140,7 @@ This script will:
 - Build **`ansible-server`** in release mode with **embedded UI**
 - Install the binary to **`/usr/local/bin/ansible-server`**
 - Create user **`ansible-ui`** and data dir **`/var/lib/ansible-ui`**
-- Install and enable **`ansible-ui.service`** (listens on **`0.0.0.0:14300`**; DB under `/var/lib/ansible-ui`)
+- Install and enable **`ansible-ui.service`** (with **nginx**/**lighttpd**: backend **`127.0.0.1:14300`** + relaxed CORS; with **`INSTALL_WEB_PROXY=none`**: **`0.0.0.0:14300`**; DB under `/var/lib/ansible-ui`)
 
 Commands after install:
 

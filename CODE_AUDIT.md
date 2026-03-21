@@ -27,6 +27,7 @@
 |------|----------|--------|
 | **No API authentication** | High | Any client that can reach the port can use the API. Mitigate with firewall, reverse proxy + auth, or VPN. |
 | **Encryption key file** | Medium | Back up `ansible_ui_secret.key` (or set `ANSIBLE_UI_SECRET_KEY`). A **new** generated key cannot decrypt credentials encrypted with an old key. |
+| **`ANSIBLE_UI_RELAX_CORS`** | High if public | Installer sets this with nginx/lighttpd so LAN browsers can use the API. **Never** expose that host:80 to the Internet without TLS + auth + removing relax mode. |
 | **CORS allow-list** | Medium | Defaults + `ANSIBLE_UI_EXTRA_ORIGINS`; **`null`** origin allowed for some local/embed cases — remove if you only trust explicit origins. |
 | **Ansible host keys** | Low | Default `ANSIBLE_HOST_KEY_CHECKING=False`; set `True` when acceptable. |
 | **Playbook path** | Medium | Non-Git playbooks must stay under process **cwd**; Git playbooks under repo root. |
