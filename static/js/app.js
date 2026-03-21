@@ -370,6 +370,18 @@ function upsertSudoConfig(extra, becomeUser, sshUser) {
   return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
+function upsertYamlKey(extra, key, value) {
+  const lines = ((extra || '').replace(/\r\n/g, '\n')).split('\n');
+  const out = [];
+  for (const line of lines) {
+    if (new RegExp(`^\\s*${key}\\s*:`).test(line)) continue;
+    out.push(line);
+  }
+  const v = (value || '').trim();
+  if (v) out.unshift(`${key}: ${v}`);
+  return out.join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
+}
+
 function looksLikePublicKey(secret) {
   const s = (secret || '').trim();
   if (!s) return false;
@@ -576,6 +588,14 @@ function openCredentialModal(id) {
           <button type="button" class="btn btn-sm btn-secondary" id="modal-apply-sudo">Use sudo</button>
         </div>
       </div>
+      <div class="form-group">
+        <label>Sudo Password (optional)</label>
+        <div style="display:flex; gap:8px;">
+          <input type="password" id="modal-sudo-pass" placeholder="optional sudo password">
+          <button type="button" class="btn btn-sm btn-secondary" id="modal-apply-sudo-pass">Use sudo password</button>
+        </div>
+        <small class="text-muted">This writes <code>ansible_become_password</code> to Extra YAML (plain text).</small>
+      </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
      <button class="btn btn-primary" id="modal-save-cred" data-id="${id || ''}">Save</button>`
@@ -584,6 +604,7 @@ function openCredentialModal(id) {
   const sshUserInput = qs('#modal-ssh-user');
   const extraInput = qs('#modal-cred-extra');
   const sudoUserInput = qs('#modal-sudo-user');
+  const sudoPassInput = qs('#modal-sudo-pass');
   qs('#modal-apply-ssh-user').onclick = () => {
     extraInput.value = upsertAnsibleUser(extraInput.value, sshUserInput.value);
   };
@@ -594,6 +615,15 @@ function openCredentialModal(id) {
       sudoUserInput.value = 'root';
     }
     extraInput.value = upsertSudoConfig(extraInput.value, sudoUser, sshUserInput.value);
+  };
+  qs('#modal-apply-sudo-pass').onclick = () => {
+    let sudoPass = sudoPassInput.value;
+    if (!sudoPass.trim() && qs('#modal-kind').value === 'password') {
+      // Common case: sudo password equals SSH password.
+      sudoPass = qs('#modal-secret').value || '';
+      sudoPassInput.value = sudoPass;
+    }
+    extraInput.value = upsertYamlKey(extraInput.value, 'ansible_become_password', sudoPass);
   };
   if (!c && projects[0]) sel.value = projects[0].id;
   qs('#modal-save-cred').onclick = async () => {
