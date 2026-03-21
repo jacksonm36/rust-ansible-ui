@@ -665,18 +665,19 @@ fn cors_layer() -> CorsLayer {
 fn api_routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/{id}/pull", post(pull_project))
-        .route("/projects/{id}", get(get_project).patch(update_project).delete(delete_project))
+        // matchit 0.7 (used by axum 0.7) requires `:param`, not `{param}` — braces are literal.
+        .route("/projects/:id/pull", post(pull_project))
+        .route("/projects/:id", get(get_project).patch(update_project).delete(delete_project))
         .route("/inventories", get(list_inventories).post(create_inventory))
-        .route("/inventories/{id}", get(get_inventory).patch(update_inventory).delete(delete_inventory))
+        .route("/inventories/:id", get(get_inventory).patch(update_inventory).delete(delete_inventory))
         .route("/credentials", get(list_credentials).post(create_credential))
-        .route("/credentials/{id}", get(get_credential).patch(update_credential).delete(delete_credential))
+        .route("/credentials/:id", get(get_credential).patch(update_credential).delete(delete_credential))
         .route("/job_templates", get(list_job_templates).post(create_job_template))
-        .route("/job_templates/{id}", get(get_job_template).patch(update_job_template).delete(delete_job_template))
-        .route("/job_templates/{id}/next_run", get(get_next_run))
+        .route("/job_templates/:id", get(get_job_template).patch(update_job_template).delete(delete_job_template))
+        .route("/job_templates/:id/next_run", get(get_next_run))
         .route("/jobs", get(list_jobs))
         .route("/jobs/launch", post(launch_job))
-        .route("/jobs/{id}", get(get_job).delete(delete_job))
+        .route("/jobs/:id", get(get_job).delete(delete_job))
         .with_state(state)
 }
 
