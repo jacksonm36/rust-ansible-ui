@@ -504,6 +504,12 @@ async fn ssh_deployer_deploy_pubkey(
     State(state): State<AppState>,
     Json(body): Json<DeployPubkeyBody>,
 ) -> Result<Json<DeployPubkeyResponse>, Response> {
+    if body.project_id <= 0 {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Invalid project_id.",
+        ));
+    }
     if body.ips.len() > 32 {
         return Err(api_err(
             StatusCode::BAD_REQUEST,
@@ -526,6 +532,12 @@ async fn ssh_deployer_deploy_pubkey(
             return Err(api_err(
                 StatusCode::BAD_REQUEST,
                 "One-time password deploy requires both ephemeral_username and ephemeral_password.",
+            ));
+        }
+        if body.credential_id.is_some_and(|id| id > 0) {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Do not send credential_id together with one-time username/password.",
             ));
         }
     }

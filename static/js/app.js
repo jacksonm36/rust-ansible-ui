@@ -463,8 +463,8 @@ async function sshDeployPubkeys() {
   const public_key = (ta && ta.value ? ta.value : sshDeployerState.deployPubkeyText || '').trim();
   if (!public_key) { alert('Paste or generate a public key first.'); return; }
   const proj = qs('#ssh-deploy-project');
-  const project_id = proj ? parseInt(proj.value, 10) : 0;
-  if (!project_id) { alert('Select a project.'); return; }
+  const project_id = proj ? parseInt(proj.value, 10) : NaN;
+  if (!Number.isFinite(project_id) || project_id <= 0) { alert('Select a project.'); return; }
   const ips = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
     (sshDeployerState.hosts || []).some(h => h.ip === ip)
   );
