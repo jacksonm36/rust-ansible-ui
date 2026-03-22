@@ -11,6 +11,7 @@ use std::process::Command;
 use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
+use ssh_key::private::PrivateKey;
 use tempfile::NamedTempFile;
 
 const MAX_HOSTS: u32 = 1024;
@@ -204,14 +205,39 @@ pub fn scan_cidr(cidr: &str) -> Result<Vec<ScanHost>, String> {
     Ok(hosts)
 }
 
-/// Derive OpenSSH public key line from a private key PEM (requires `ssh-keygen` on PATH).
+/// Normalize stored secret: trim, strip BOM, unify newlines (avoids ssh-keygen/libcrypto parse failures).
+fn normalize_private_key_text(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    if s.starts_with('\u{feff}') {
+        s.remove(0);
+    }
+    s = s.replace("\r\n", "\n").replace('\r', "\n");
+    s.trim().to_string()
+}
+
+fn public_key_line_from_private(pk: &PrivateKey) -> Result<String, String> {
+    pk.public_key()
+        .to_openssh()
+        .map(|s| s.to_string())
+        .map_err(|e| format!("Could not encode public key: {e}"))
+}
+
+/// Derive OpenSSH public key line from a private key (OpenSSH or PEM). Uses the **`ssh-key` crate**
+/// first so we do not depend on `ssh-keygen`/OpenSSL for common formats (fixes many `libcrypto` errors).
+/// Falls back to `ssh-keygen -y` for edge cases.
 pub fn public_key_from_private_pem(pem: &str) -> Result<String, String> {
-    let pem = pem.trim();
+    let pem = normalize_private_key_text(pem);
     if pem.is_empty() {
         return Err("Empty key".into());
     }
+
+    if let Ok(pk) = PrivateKey::from_openssh(&pem) {
+        return public_key_line_from_private(&pk);
+    }
+
     let mut f = NamedTempFile::new().map_err(|e| e.to_string())?;
     f.write_all(pem.as_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(b"\n").map_err(|e| e.to_string())?;
     f.flush().map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -231,7 +257,7 @@ pub fn public_key_from_private_pem(pem: &str) -> Result<String, String> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
-            "ssh-keygen failed: {}",
+            "Could not read private key (try re-pasting the key; password-protected keys are not supported here). ssh-keygen: {}",
             err.trim().chars().take(200).collect::<String>()
         ));
     }

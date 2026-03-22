@@ -34,6 +34,7 @@
 - **`POST /api/ssh_deployer/public_key`:** JSON must include **`project_id`**; server checks the project exists and the credential belongs to that project. Wrong project returns **404** with the same message as a missing credential to reduce ID enumeration.
 - **Playbook listing:** `playbook_discovery::PlaybookListError` distinguishes missing project vs I/O instead of string-matching errors.
 - **Deploy pubkey:** `ansible_user` from credential Extra is restricted to safe characters; IPs validated as IPv4; max 32 hosts per request; duplicate identical `authorized_keys` lines skipped (`grep -qxF` on remote).
+- **Public key from credential:** Derived with the **`ssh-key`** crate (OpenSSH PEM) first, then `ssh-keygen -y` fallback; avoids many host `libcrypto` / OpenSSL mismatches when reading keys from the DB.
 
 ### Frontend
 

@@ -40,6 +40,8 @@ let sshDeployerState = {
   selectedIps: {},
   /** Public key line(s) to deploy / paste (kept across re-renders). */
   deployPubkeyText: '',
+  /** Last private key from "Generate" (memory only; cleared after save to credentials). */
+  lastGeneratedPrivateKey: '',
 };
 
 const REFRESH_INTERVAL_MS = 4000;
@@ -145,6 +147,7 @@ function runAction(action, id, el) {
   if (action === 'ssh-add-inventory') { addScannedHostsToInventory(); return; }
   if (action === 'ssh-generate-keys') { sshGenerateKeypair().catch(showError); return; }
   if (action === 'ssh-deploy-keys') { sshDeployPubkeys().catch(showError); return; }
+  if (action === 'ssh-save-generated-cred') { sshSaveGeneratedToCredential().catch(showError); return; }
 }
 
 function renderDashboard() {
@@ -194,7 +197,8 @@ function yamlInventoryFromIps(ips) {
 }
 
 function renderSshDeployer() {
-  const { cidr, hosts, selectedIps, deployPubkeyText } = sshDeployerState;
+  const { cidr, hosts, selectedIps, deployPubkeyText, lastGeneratedPrivateKey } = sshDeployerState;
+  const canSaveGenerated = !!(lastGeneratedPrivateKey && String(lastGeneratedPrivateKey).trim());
   const sel = selectedIps || {};
   const projectOpts = projects.length
     ? projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
@@ -258,9 +262,10 @@ function renderSshDeployer() {
     <div class="card">
       <div class="card-header">3. Key pair &amp; deploy</div>
       <div class="card-body ssh-card-body">
-        <div class="form-row ssh-key-row">
+        <div class="form-row ssh-key-row ssh-key-row-btns">
           <button type="button" class="btn btn-secondary" data-action="ssh-generate-keys">Generate new Ed25519 key pair</button>
-          <span class="text-muted">Runs <code>ssh-keygen</code> on the server. Copy the <strong>private</strong> key into <strong>Credentials</strong> if you want to keep it.</span>
+          <button type="button" class="btn btn-primary" data-action="ssh-save-generated-cred" ${canSaveGenerated ? '' : 'disabled'} title="Stores the last generated private key as an SSH credential">Save private key to credentials</button>
+          <span class="text-muted">Runs <code>ssh-keygen</code> on the server. Use <strong>Save private key to credentials</strong> after generate, or copy from the dialog.</span>
         </div>
         <div class="form-group">
           <label>Public key line to install on selected hosts</label>
@@ -317,6 +322,7 @@ async function runSshScan() {
       hosts: newHosts,
       selectedIps: nextSel,
       deployPubkeyText: sshDeployerState.deployPubkeyText || '',
+      lastGeneratedPrivateKey: sshDeployerState.lastGeneratedPrivateKey || '',
     };
     render();
   } catch (e) {
@@ -363,17 +369,54 @@ async function sshGenerateKeypair() {
   const pub = data.public_key || '';
   const priv = data.private_key_openssh || '';
   sshDeployerState.deployPubkeyText = pub;
+  sshDeployerState.lastGeneratedPrivateKey = priv;
   render();
   showModal(
     'Generated Ed25519 key pair',
-    `<p style="color:var(--failed);font-size:0.9rem">Anyone with this page can see the private key until you close the dialog. Copy it to a credential, then close.</p>
+    `<p style="color:var(--failed);font-size:0.9rem">Anyone with this page can see the private key until you close the dialog. Save it with the button below or copy to <strong>Credentials</strong>.</p>
      <p class="text-muted">The <strong>public</strong> line is also in &quot;Public key to install&quot; below.</p>
      <label>Private key (copy once, then store securely)</label>
      <textarea readonly class="ssh-pubkey-ta" style="min-height:140px">${escapeHtml(priv)}</textarea>
      <label>Public key</label>
      <textarea readonly class="ssh-pubkey-ta">${escapeHtml(pub)}</textarea>`,
-    '<button class="btn btn-secondary" data-action="close-modal">Close</button>'
+    '<button type="button" class="btn btn-primary" data-action="ssh-save-generated-cred">Save private key to credentials</button> <button type="button" class="btn btn-secondary" data-action="close-modal">Close</button>'
   );
+}
+
+async function sshSaveGeneratedToCredential() {
+  const priv = (sshDeployerState.lastGeneratedPrivateKey || '').trim();
+  if (!priv) {
+    alert('Generate a key pair first (section 3: Generate new Ed25519 key pair).');
+    return;
+  }
+  const proj = qs('#ssh-deploy-project');
+  const project_id = proj ? parseInt(proj.value, 10) : 0;
+  if (!project_id) {
+    alert('Select a project in section 3 (Project dropdown above Deploy).');
+    return;
+  }
+  const defaultName = `deploy-ed25519-${new Date().toISOString().slice(0, 10)}`;
+  const name = prompt('Credential name:', defaultName);
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (!trimmed) {
+    alert('Name is required.');
+    return;
+  }
+  await fetchJSON(`${API}/credentials`, {
+    method: 'POST',
+    body: JSON.stringify({
+      project_id,
+      name: trimmed,
+      kind: 'ssh',
+      secret: priv,
+      extra: '',
+    }),
+  });
+  sshDeployerState.lastGeneratedPrivateKey = '';
+  alert(`Credential "${trimmed}" saved. You can select it under Login credential or SSH private key credential.`);
+  closeModal();
+  await reloadAndRender();
 }
 
 async function sshDeployPubkeys() {

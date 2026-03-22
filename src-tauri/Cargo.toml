@@ -35,6 +35,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lazy_static = "1"
 walkdir = "2"
 rust-embed = { version = "8", optional = true }
+# Pure-Rust SSH key parse (avoids ssh-keygen/libcrypto mismatches for "Show public key").
+ssh-key = { version = "0.6.7", features = ["std", "ed25519", "rsa", "ecdsa", "p256", "p384", "p521"] }
 
 [[bin]]
 name = "ansible-server"

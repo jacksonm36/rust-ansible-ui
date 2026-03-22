@@ -480,6 +480,13 @@ input:focus, textarea:focus {
   gap: 12px;
   align-items: flex-end;
 }
+#ssh-deployer-root .ssh-key-row-btns {
+  align-items: center;
+}
+#ssh-deployer-root .ssh-key-row-btns .text-muted {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
 #ssh-deployer-root .invisible {
   opacity: 0;
   height: 0;
