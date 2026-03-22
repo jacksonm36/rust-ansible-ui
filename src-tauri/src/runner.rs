@@ -30,17 +30,20 @@ fn truncate_output(out: &str) -> String {
 
 /// Ansible picks the inventory plugin from the temp file suffix. YAML content (e.g. `all:` /
 /// `hosts:`) must use `.yaml`, or the INI plugin runs and fails with "Invalid host pattern 'all:'".
+///
+/// **Do not** treat a leading `---` alone as YAML: documents like `---\n192.168.1.247` parse as a
+/// root scalar and break the yaml inventory plugin ("expected dictionary and got: …").
 fn inventory_temp_suffix(content: &str) -> &'static str {
     let s = content.trim_start();
     if s.starts_with('[') {
         return ".ini";
     }
-    if s.starts_with("---") {
-        return ".yaml";
-    }
     for line in s.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t == "---" || t == "..." {
             continue;
         }
         if t.starts_with('[') && t.ends_with(']') {
@@ -94,8 +97,57 @@ fn normalize_ansible_text(s: &str) -> String {
         .collect()
 }
 
+/// True if `s` is a dotted IPv4 (optional quotes), nothing else.
+fn token_is_ipv4_host(s: &str) -> bool {
+    let s = s.trim().trim_matches(|c| c == '"' || c == '\'');
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    for p in parts {
+        if p.is_empty() || p.len() > 3 || !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if p.parse::<u8>().is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// One address per line, optional `---` / `…` markers, optional comments → Ansible INI `[scanned]`.
+/// Prevents `.yaml` temp files whose YAML root is a bare string (Ansible: "expected dictionary").
+fn rewrite_bare_ip_lines_to_ini(s: &str) -> Option<String> {
+    let mut hosts: Vec<&str> = Vec::new();
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t == "---" || t == "..." {
+            continue;
+        }
+        if !token_is_ipv4_host(t) {
+            return None;
+        }
+        hosts.push(t.trim_matches(|c| c == '"' || c == '\''));
+    }
+    if hosts.is_empty() {
+        return None;
+    }
+    let mut ini = String::from("[scanned]\n");
+    for ip in hosts {
+        ini.push_str(ip);
+        ini.push('\n');
+    }
+    Some(ini)
+}
+
 fn sanitize_inventory_content(s: &str) -> String {
     let mut out = normalize_ansible_text(s);
+    if let Some(ini) = rewrite_bare_ip_lines_to_ini(&out) {
+        out = ini;
+    }
     if !out.ends_with('\n') {
         out.push('\n');
     }
