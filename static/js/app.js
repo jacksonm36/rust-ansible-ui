@@ -198,13 +198,26 @@ function renderDashboard() {
   `;
 }
 
+/** Build a minimal Ansible YAML inventory from scanned IPv4 addresses. */
 function yamlInventoryFromIps(ips) {
-  if (!ips.length) return '[scanned]\n';
-  const lines = ['all:', '  children:', '    scanned:', '      hosts:'];
+  if (!ips.length) {
+    return (
+      '# No hosts selected. Example after scan:\n' +
+      'scanned:\n' +
+      '  hosts:\n' +
+      '    "192.168.1.10":\n' +
+      '      ansible_connection: ssh\n'
+    );
+  }
+  const lines = [
+    '# From LAN scan — IPs are quoted so YAML does not treat them as numbers.',
+    '# Set remote user via job template credential Extra (ansible_user), extra vars, or add below.',
+    'scanned:',
+    '  hosts:',
+  ];
   ips.forEach(ip => {
-    const hid = 'h' + ip.replace(/\./g, '_');
-    lines.push(`        ${hid}:`);
-    lines.push(`          ansible_host: ${ip}`);
+    lines.push(`    "${ip}":`);
+    lines.push('      ansible_connection: ssh');
   });
   return lines.join('\n');
 }
