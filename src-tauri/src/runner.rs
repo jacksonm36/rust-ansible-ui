@@ -401,41 +401,44 @@ fn run_script(script_path: &str, extra_vars: &str, timeout_secs: u64) -> (i32, S
     }
 }
 
-/// Run playbook (or script) and update job status in DB.
-pub fn run_playbook(
-    db: &DbPool,
-    job_id: i64,
-    playbook_path: &str,
-    inventory_content: &str,
-    extra_vars: &str,
-    credential_ssh_key: Option<&str>,
-    credential_ssh_password: Option<&str>,
-    credential_vault_password: Option<&str>,
-    credential_extra: &str,
-) -> (String, String) {
-    let _ = crud::update_job_status(db, job_id, "running", "");
+/// Arguments for [`run_playbook`].
+pub struct PlaybookRunParams<'a> {
+    pub db: &'a DbPool,
+    pub job_id: i64,
+    pub playbook_path: &'a str,
+    pub inventory_content: &'a str,
+    pub extra_vars: &'a str,
+    pub ssh_key: Option<&'a str>,
+    pub ssh_password: Option<&'a str>,
+    pub vault_password: Option<&'a str>,
+    pub credential_extra: &'a str,
+}
 
-    if is_script(playbook_path) {
+/// Run playbook (or script) and update job status in DB.
+pub fn run_playbook(p: PlaybookRunParams<'_>) -> (String, String) {
+    let _ = crud::update_job_status(p.db, p.job_id, "running", "");
+
+    if is_script(p.playbook_path) {
         let to = script_timeout_secs();
-        let (code, out) = run_script(playbook_path, extra_vars, to);
+        let (code, out) = run_script(p.playbook_path, p.extra_vars, to);
         let status = if code == 0 { "success" } else { "failed" };
         let out_capped = truncate_output(&out);
-        let _ = crud::update_job_status(db, job_id, status, &out_capped);
+        let _ = crud::update_job_status(p.db, p.job_id, status, &out_capped);
         return (status.to_string(), out);
     }
 
-    let playbook_abs = std::fs::canonicalize(playbook_path)
-        .unwrap_or_else(|_| Path::new(playbook_path).to_path_buf());
+    let playbook_abs = std::fs::canonicalize(p.playbook_path)
+        .unwrap_or_else(|_| Path::new(p.playbook_path).to_path_buf());
     if !playbook_abs.is_file() {
         let msg = format!("Playbook file not found: {}", playbook_abs.display());
-        let _ = crud::update_job_status(db, job_id, "failed", &msg);
+        let _ = crud::update_job_status(p.db, p.job_id, "failed", &msg);
         return ("failed".into(), msg);
     }
 
-    let inv_content = if inventory_content.is_empty() {
+    let inv_content = if p.inventory_content.is_empty() {
         "[all]\nlocalhost ansible_connection=local\n".to_string()
     } else {
-        sanitize_inventory_content(inventory_content)
+        sanitize_inventory_content(p.inventory_content)
     };
 
     let inv_suffix = inventory_temp_suffix(&inv_content);
@@ -443,7 +446,7 @@ pub fn run_playbook(
         Ok(f) => f,
         Err(e) => {
             let msg = format!("Failed to create temporary inventory file: {}", e);
-            let _ = crud::update_job_status(db, job_id, "failed", &msg);
+            let _ = crud::update_job_status(p.db, p.job_id, "failed", &msg);
             return ("failed".to_string(), msg);
         }
     };
@@ -460,7 +463,7 @@ pub fn run_playbook(
     ];
 
     // Credential vars first; job-template extra_vars second (overrides on duplicate keys).
-    if let Some(yaml) = build_credential_extra_vars_yaml(credential_ssh_password, credential_extra) {
+    if let Some(yaml) = build_credential_extra_vars_yaml(p.ssh_password, p.credential_extra) {
         if let Ok(f) = NamedTempFile::with_suffix(".yml") {
             if std::fs::write(f.path(), yaml).is_ok() {
                 #[cfg(unix)]
@@ -476,13 +479,13 @@ pub fn run_playbook(
         }
     }
 
-    let extra_norm = normalize_ansible_text(extra_vars.trim());
+    let extra_norm = normalize_ansible_text(p.extra_vars.trim());
     if !extra_norm.is_empty() {
         args.push("-e".into());
         args.push(extra_norm);
     }
 
-    if let Some(key) = credential_ssh_key {
+    if let Some(key) = p.ssh_key {
         if let Ok(f) = NamedTempFile::with_suffix(".pem") {
             let key = key.trim();
             let content = if key.ends_with('\n') {
@@ -504,7 +507,7 @@ pub fn run_playbook(
         }
     }
 
-    if let Some(vault) = credential_vault_password {
+    if let Some(vault) = p.vault_password {
         if let Ok(f) = NamedTempFile::with_suffix(".vault") {
             if std::fs::write(f.path(), format!("{}\n", vault.trim())).is_ok() {
                 #[cfg(unix)]
@@ -539,7 +542,7 @@ pub fn run_playbook(
     cmd.stderr(Stdio::piped());
 
     let timeout_secs = playbook_timeout_secs();
-    let outcome = run_command_with_live_updates(db, job_id, cmd, timeout_secs);
+    let outcome = run_command_with_live_updates(p.db, p.job_id, cmd, timeout_secs);
 
     let (out, status_str) = match outcome {
         CapturedRun::Finished(status, stdout, stderr) => {
@@ -558,12 +561,12 @@ pub fn run_playbook(
             (out, "failed")
         }
         CapturedRun::IoError(e) => {
-            let _ = crud::update_job_status(db, job_id, "failed", &e);
+            let _ = crud::update_job_status(p.db, p.job_id, "failed", &e);
             return ("failed".into(), e);
         }
     };
 
     let out_capped = truncate_output(&out);
-    let _ = crud::update_job_status(db, job_id, status_str, &out_capped);
+    let _ = crud::update_job_status(p.db, p.job_id, status_str, &out_capped);
     (status_str.to_string(), out)
 }

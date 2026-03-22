@@ -59,11 +59,11 @@
 
 | Area | Suggestion |
 |------|------------|
-| **Types** | `crud::get_project` / `get_projects` tuples and `resolve_playbook_and_creds` return type are hard to read; consider small structs. |
-| **`run_playbook` arity** | Nine parameters; a `PlaybookRunParams` struct would simplify call sites. |
+| **Types** | `ProjectRow` type alias in `crud`; `ResolvedPlaybookRun` + `PlaybookRunParams` reduce tuple sprawl at playbook launch. |
+| **`run_playbook`** | Uses `runner::PlaybookRunParams` (single argument). |
 | **`unwrap` / `expect`** | Acceptable for regex compile, HTTP builder after known-good values, startup (`init_db`, bind). `secrets` encrypt uses `expect` on fixed 32-byte key—OK. |
 | **Scheduler** | `schedule_tz` documented as partial; cron evaluated in UTC—document clearly in UI. |
-| **Clippy** | Run `cargo clippy -- -D warnings` in CI when feasible; several style warnings remain optional. |
+| **Clippy** | `cargo clippy --no-default-features --features server-only` clean on recent pass; use `-D warnings` in CI when feasible. |
 
 ---
 

@@ -90,6 +90,7 @@ const MAX_CREDENTIAL_NAME_LEN: usize = 256;
 const MAX_CREDENTIAL_EXTRA_LEN: usize = 16 * 1024;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 512 * 1024;
 
+#[allow(clippy::result_large_err)]
 fn validate_credential_create(data: &mut CredentialCreate) -> Result<(), Response> {
     data.name = data.name.trim().to_string();
     if data.name.is_empty() {
@@ -121,6 +122,7 @@ fn validate_credential_create(data: &mut CredentialCreate) -> Result<(), Respons
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_credential_update(data: &CredentialUpdate) -> Result<(), Response> {
     if let Some(ref n) = data.name {
         let t = n.trim();
@@ -773,23 +775,23 @@ async fn delete_job(State(state): State<AppState>, Path(id): Path<i64>) -> Resul
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Resolved playbook path, inventory/extra text, and decrypted credential material for a job run.
+struct ResolvedPlaybookRun {
+    playbook_path: String,
+    inventory_content: String,
+    extra_vars: String,
+    ssh_key: Option<String>,
+    ssh_password: Option<String>,
+    vault_pass: Option<String>,
+    credential_extra: String,
+}
+
 fn resolve_playbook_and_creds(
     db: &DbPool,
     jt: &JobTemplateRead,
     inv_content: &str,
     extra: &str,
-) -> Result<
-    (
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    ),
-    String,
-> {
+) -> Result<ResolvedPlaybookRun, String> {
     let project = crud::get_project(db, jt.project_id).ok_or("Project not found")?;
     let mut playbook_path = jt.playbook_path.clone();
     let inv_content = inv_content.to_string();
@@ -867,15 +869,15 @@ fn resolve_playbook_and_creds(
         }
     }
 
-    Ok((
+    Ok(ResolvedPlaybookRun {
         playbook_path,
-        inv_content,
-        extra,
+        inventory_content: inv_content,
+        extra_vars: extra,
         ssh_key,
         ssh_password,
         vault_pass,
         credential_extra,
-    ))
+    })
 }
 
 pub fn launch_job_template_by_id_impl(db: &DbPool, job_template_id: i64) -> Option<impl FnOnce() + Send> {
@@ -885,23 +887,38 @@ pub fn launch_job_template_by_id_impl(db: &DbPool, job_template_id: i64) -> Opti
         .map(|i| i.content)
         .unwrap_or_default();
     let extra = jt.extra_vars.clone();
-    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass, credential_extra) =
-        resolve_playbook_and_creds(db, &jt, &inv_content, &extra).ok()?;
-    let job = crud::create_job(db, jt.project_id, Some(jt.id), &playbook_path, &inv_content, &extra, "pending").ok()?;
+    let r = resolve_playbook_and_creds(db, &jt, &inv_content, &extra).ok()?;
+    let job = crud::create_job(
+        db,
+        jt.project_id,
+        Some(jt.id),
+        &r.playbook_path,
+        &r.inventory_content,
+        &r.extra_vars,
+        "pending",
+    )
+    .ok()?;
     let job_id = job.id;
     let db2 = db.clone();
+    let playbook_path = r.playbook_path.clone();
+    let inventory_content = r.inventory_content.clone();
+    let extra_vars = r.extra_vars.clone();
+    let ssh_key = r.ssh_key.clone();
+    let ssh_password = r.ssh_password.clone();
+    let vault_pass = r.vault_pass.clone();
+    let credential_extra = r.credential_extra.clone();
     Some(move || {
-        let _ = runner::run_playbook(
-            &db2,
+        let _ = runner::run_playbook(runner::PlaybookRunParams {
+            db: &db2,
             job_id,
-            &playbook_path,
-            &inv_content,
-            &extra,
-            ssh_key.as_deref(),
-            ssh_password.as_deref(),
-            vault_pass.as_deref(),
-            &credential_extra,
-        );
+            playbook_path: &playbook_path,
+            inventory_content: &inventory_content,
+            extra_vars: &extra_vars,
+            ssh_key: ssh_key.as_deref(),
+            ssh_password: ssh_password.as_deref(),
+            vault_password: vault_pass.as_deref(),
+            credential_extra: &credential_extra,
+        });
     })
 }
 
@@ -912,28 +929,39 @@ async fn launch_job(State(state): State<AppState>, Json(data): Json<JobLaunch>) 
         .map(|i| i.content)
         .unwrap_or_default();
     let extra = data.extra_vars_override.as_ref().filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| jt.extra_vars.clone());
-    let (playbook_path, inv_content, extra, ssh_key, ssh_password, vault_pass, credential_extra) =
-        resolve_playbook_and_creds(&state.db, &jt, &inv_content, &extra).map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
-    let job = crud::create_job(&state.db, jt.project_id, Some(jt.id), &playbook_path, &inv_content, &extra, "pending")
-        .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job"))?;
+    let resolved = resolve_playbook_and_creds(&state.db, &jt, &inv_content, &extra)
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+    let job = crud::create_job(
+        &state.db,
+        jt.project_id,
+        Some(jt.id),
+        &resolved.playbook_path,
+        &resolved.inventory_content,
+        &resolved.extra_vars,
+        "pending",
+    )
+    .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job"))?;
     let job_id = job.id;
     let db_clone = state.db.clone();
-    let playbook_path2 = playbook_path.clone();
-    let inv_content2 = inv_content.clone();
-    let extra2 = extra.clone();
-    let credential_extra2 = credential_extra.clone();
+    let playbook_path2 = resolved.playbook_path.clone();
+    let inv_content2 = resolved.inventory_content.clone();
+    let extra2 = resolved.extra_vars.clone();
+    let ssh_key = resolved.ssh_key.clone();
+    let ssh_password = resolved.ssh_password.clone();
+    let vault_pass = resolved.vault_pass.clone();
+    let credential_extra2 = resolved.credential_extra.clone();
     std::thread::spawn(move || {
-        let _ = runner::run_playbook(
-            &db_clone,
+        let _ = runner::run_playbook(runner::PlaybookRunParams {
+            db: &db_clone,
             job_id,
-            &playbook_path2,
-            &inv_content2,
-            &extra2,
-            ssh_key.as_deref(),
-            ssh_password.as_deref(),
-            vault_pass.as_deref(),
-            &credential_extra2,
-        );
+            playbook_path: &playbook_path2,
+            inventory_content: &inv_content2,
+            extra_vars: &extra2,
+            ssh_key: ssh_key.as_deref(),
+            ssh_password: ssh_password.as_deref(),
+            vault_password: vault_pass.as_deref(),
+            credential_extra: &credential_extra2,
+        });
     });
     crud::get_job(&state.db, job.id).map(Json).ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Job not found"))
 }
@@ -1023,6 +1051,7 @@ const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SCHEDULE_CRON_LEN: usize = 256;
 const MAX_SCHEDULE_TZ_LEN: usize = 64;
 
+#[allow(clippy::result_large_err)]
 fn validate_schedule_fields(
     cron: Option<&String>,
     tz: Option<&String>,

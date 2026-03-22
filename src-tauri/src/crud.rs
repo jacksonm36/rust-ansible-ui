@@ -9,8 +9,20 @@ fn conn(db: &DbPool) -> MutexGuard<'_, rusqlite::Connection> {
     db.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Project row from SQLite (`id`, `name`, `description`, `git_url`, `git_branch`, `git_credential_id`, timestamps).
+pub type ProjectRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    String,
+    String,
+);
+
 // --- Projects ---
-pub fn get_project(db: &DbPool, id: i64) -> Option<(i64, String, String, Option<String>, Option<String>, Option<i64>, String, String)> {
+pub fn get_project(db: &DbPool, id: i64) -> Option<ProjectRow> {
     let c = conn(db);
     let mut stmt = c.prepare(
         "SELECT id, name, description, git_url, git_branch, git_credential_id, created_at, updated_at FROM projects WHERE id = ?1",
@@ -30,7 +42,7 @@ pub fn get_project(db: &DbPool, id: i64) -> Option<(i64, String, String, Option<
     Some(row)
 }
 
-pub fn get_projects(db: &DbPool) -> Vec<(i64, String, String, Option<String>, Option<String>, Option<i64>, String, String)> {
+pub fn get_projects(db: &DbPool) -> Vec<ProjectRow> {
     let c = conn(db);
     let mut stmt = match c.prepare(
         "SELECT id, name, description, git_url, git_branch, git_credential_id, created_at, updated_at FROM projects ORDER BY name",
