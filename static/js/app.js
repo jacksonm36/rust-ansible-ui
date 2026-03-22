@@ -198,9 +198,23 @@ function renderDashboard() {
   `;
 }
 
+/** Reject non-IPv4 / tampered checkbox values so inventory YAML cannot be broken out of with crafted strings. */
+function isValidIpv4String(ip) {
+  if (typeof ip !== 'string' || ip.length < 7 || ip.length > 15) return false;
+  const parts = ip.split('.');
+  if (parts.length !== 4) return false;
+  for (const oct of parts) {
+    if (!/^\d{1,3}$/.test(oct)) return false;
+    const n = Number(oct);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return false;
+  }
+  return true;
+}
+
 /** Build a minimal Ansible YAML inventory from scanned IPv4 addresses. */
 function yamlInventoryFromIps(ips) {
-  if (!ips.length) {
+  const valid = (ips || []).filter(isValidIpv4String);
+  if (!valid.length) {
     return (
       '# No hosts selected. Example after scan:\n' +
       'scanned:\n' +
@@ -215,7 +229,7 @@ function yamlInventoryFromIps(ips) {
     'scanned:',
     '  hosts:',
   ];
-  ips.forEach(ip => {
+  valid.forEach(ip => {
     lines.push(`    "${ip}":`);
     lines.push('      ansible_connection: ssh');
   });
@@ -402,9 +416,9 @@ function addScannedHostsToInventory() {
   const taPub = qs('#ssh-deploy-pubkey');
   if (taPub) sshDeployerState.deployPubkeyText = taPub.value;
   const selected = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
-    (sshDeployerState.hosts || []).some(h => h.ip === ip)
+    isValidIpv4String(ip) && (sshDeployerState.hosts || []).some(h => h.ip === ip)
   );
-  if (!selected.length) { alert('Select at least one host in the table (checkboxes).'); return; }
+  if (!selected.length) { alert('Select at least one valid IPv4 host in the table (checkboxes).'); return; }
   const sel = qs('#ssh-inv-project');
   const project_id = sel ? parseInt(sel.value, 10) : NaN;
   if (!project_id) { alert('Choose a project.'); return; }
@@ -479,9 +493,9 @@ async function sshDeployPubkeys() {
   const project_id = proj ? parseInt(proj.value, 10) : NaN;
   if (!Number.isFinite(project_id) || project_id <= 0) { alert('Select a project.'); return; }
   const ips = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
-    (sshDeployerState.hosts || []).some(h => h.ip === ip)
+    isValidIpv4String(ip) && (sshDeployerState.hosts || []).some(h => h.ip === ip)
   );
-  if (!ips.length) { alert('Select at least one host in the scan table.'); return; }
+  if (!ips.length) { alert('Select at least one valid IPv4 host in the scan table.'); return; }
   if (ips.length > 32) { alert('Maximum 32 hosts per deploy. Narrow your selection.'); return; }
 
   const mode = sshDeployerState.deployAuthMode === 'ephemeral' ? 'ephemeral' : 'saved';

@@ -36,6 +36,8 @@
 - **Deploy pubkey:** `ansible_user` from credential Extra is restricted to safe characters; IPs validated as IPv4; max 32 hosts per request; duplicate identical `authorized_keys` lines skipped (`grep -qxF` on remote). `project_id` must be positive; requests cannot combine `credential_id` with one-time `ephemeral_*` fields.
 - **Public key from credential:** Derived with the **`ssh-key`** crate (OpenSSH PEM) first, then `ssh-keygen -y` fallback; avoids many host `libcrypto` / OpenSSL mismatches when reading keys from the DB.
 - **Credential API:** Create/update reject empty names, enforce max **256** chars for name, **16 KiB** for `extra`, **512 KiB** for plaintext `secret` (abuse / DB bloat mitigation).
+- **Inventory API:** Create/update enforce name (required / max **256**), description max **4 KiB**, content max **1 MiB**; `project_id` must be positive on create.
+- **Scan → inventory / deploy (UI):** Only **validated IPv4** strings from selection are used so tampered checkbox `data-ip` cannot inject YAML or odd deploy targets.
 - **Embedded static responses:** HTTP response build failures return 500 instead of panicking on `unwrap()`.
 
 ### Frontend

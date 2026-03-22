@@ -90,6 +90,81 @@ const MAX_CREDENTIAL_NAME_LEN: usize = 256;
 const MAX_CREDENTIAL_EXTRA_LEN: usize = 16 * 1024;
 const MAX_CREDENTIAL_SECRET_BYTES: usize = 512 * 1024;
 
+/// Inventory text can be large; cap before DB / ansible temp files (body limit is 2 MiB).
+const MAX_INVENTORY_NAME_LEN: usize = 256;
+const MAX_INVENTORY_DESC_LEN: usize = 4096;
+const MAX_INVENTORY_CONTENT_BYTES: usize = 1024 * 1024;
+
+#[allow(clippy::result_large_err)]
+fn validate_inventory_create(data: &mut InventoryCreate) -> Result<(), Response> {
+    data.name = data.name.trim().to_string();
+    if data.name.is_empty() {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Inventory name is required.",
+        ));
+    }
+    if data.name.len() > MAX_INVENTORY_NAME_LEN {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Inventory name is too long (max 256 characters).",
+        ));
+    }
+    if let Some(ref d) = data.description {
+        if d.len() > MAX_INVENTORY_DESC_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory description is too long (max 4 KiB).",
+            ));
+        }
+    }
+    if let Some(ref c) = data.content {
+        if c.len() > MAX_INVENTORY_CONTENT_BYTES {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory content is too large (max 1 MiB).",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_inventory_update(data: &InventoryUpdate) -> Result<(), Response> {
+    if let Some(ref n) = data.name {
+        let t = n.trim();
+        if t.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory name cannot be empty.",
+            ));
+        }
+        if t.len() > MAX_INVENTORY_NAME_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory name is too long (max 256 characters).",
+            ));
+        }
+    }
+    if let Some(ref d) = data.description {
+        if d.len() > MAX_INVENTORY_DESC_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory description is too long (max 4 KiB).",
+            ));
+        }
+    }
+    if let Some(ref c) = data.content {
+        if c.len() > MAX_INVENTORY_CONTENT_BYTES {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Inventory content is too large (max 1 MiB).",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_credential_create(data: &mut CredentialCreate) -> Result<(), Response> {
     data.name = data.name.trim().to_string();
@@ -603,14 +678,22 @@ async fn get_inventory(State(state): State<AppState>, Path(id): Path<i64>) -> Re
     crud::get_inventory(&state.db, id).map(Json).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Inventory not found"))
 }
 
-async fn create_inventory(State(state): State<AppState>, Json(data): Json<InventoryCreate>) -> Result<Json<InventoryRead>, Response> {
+async fn create_inventory(State(state): State<AppState>, Json(mut data): Json<InventoryCreate>) -> Result<Json<InventoryRead>, Response> {
+    if data.project_id <= 0 {
+        return Err(api_err(StatusCode::BAD_REQUEST, "Invalid project_id."));
+    }
     if crud::get_project(&state.db, data.project_id).is_none() {
         return Err(api_err(StatusCode::NOT_FOUND, "Project not found"));
     }
+    validate_inventory_create(&mut data)?;
     crud::create_inventory(&state.db, &data).map(Json).map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create inventory"))
 }
 
-async fn update_inventory(State(state): State<AppState>, Path(id): Path<i64>, Json(data): Json<InventoryUpdate>) -> Result<Json<InventoryRead>, Response> {
+async fn update_inventory(State(state): State<AppState>, Path(id): Path<i64>, Json(mut data): Json<InventoryUpdate>) -> Result<Json<InventoryRead>, Response> {
+    validate_inventory_update(&data)?;
+    if let Some(ref mut n) = data.name {
+        *n = n.trim().to_string();
+    }
     crud::update_inventory(&state.db, id, &data).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Inventory not found")).map(Json)
 }
 
