@@ -483,9 +483,16 @@ async fn ssh_deployer_generate_keypair() -> Result<Json<GenerateKeypairResponse>
 #[derive(serde::Deserialize)]
 struct DeployPubkeyBody {
     project_id: i64,
-    credential_id: i64,
+    /// Saved credential (SSH key or stored password). Omit when using one-time password.
+    #[serde(default)]
+    credential_id: Option<i64>,
     ips: Vec<String>,
     public_key: String,
+    /// One-time SSH login (not stored). Both required together; requires `sshpass` on the Ansible server.
+    #[serde(default)]
+    ephemeral_username: Option<String>,
+    #[serde(default)]
+    ephemeral_password: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -503,17 +510,68 @@ async fn ssh_deployer_deploy_pubkey(
             "Too many ips in request (max 32 per deploy).",
         ));
     }
+
+    let has_user = body
+        .ephemeral_username
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let has_pass = body
+        .ephemeral_password
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if has_user || has_pass {
+        if !has_user || !has_pass {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "One-time password deploy requires both ephemeral_username and ephemeral_password.",
+            ));
+        }
+    }
+
     let db = state.db.clone();
     let project_id = body.project_id;
-    let credential_id = body.credential_id;
     let ips = body.ips;
     let public_key = body.public_key;
-    let results = tokio::task::spawn_blocking(move || {
-        ssh_deployer::deploy_public_key_to_hosts(&db, project_id, credential_id, ips, &public_key)
-    })
-    .await
-    .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
-    .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+
+    let results = if has_user && has_pass {
+        let u = body.ephemeral_username.unwrap_or_default().trim().to_string();
+        let p = body.ephemeral_password.unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            ssh_deployer::deploy_public_key_ephemeral_password(
+                &db,
+                project_id,
+                ips,
+                &public_key,
+                &u,
+                &p,
+            )
+        })
+        .await
+        .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?
+    } else {
+        let credential_id = body.credential_id.filter(|&id| id > 0).ok_or_else(|| {
+            api_err(
+                StatusCode::BAD_REQUEST,
+                "Select a login credential, or use one-time username and password.",
+            )
+        })?;
+        tokio::task::spawn_blocking(move || {
+            ssh_deployer::deploy_public_key_to_hosts(
+                &db,
+                project_id,
+                credential_id,
+                ips,
+                &public_key,
+            )
+        })
+        .await
+        .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?
+    };
+
     Ok(Json(DeployPubkeyResponse { results }))
 }
 

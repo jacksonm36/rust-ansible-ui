@@ -487,6 +487,22 @@ input:focus, textarea:focus {
   flex: 1 1 220px;
   min-width: 180px;
 }
+#ssh-deployer-root .ssh-ephemeral-deploy {
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+#ssh-deployer-root .ssh-ephemeral-input {
+  width: 100%;
+  max-width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
 #ssh-deployer-root .invisible {
   opacity: 0;
   height: 0;

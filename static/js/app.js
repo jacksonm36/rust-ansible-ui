@@ -42,6 +42,10 @@ let sshDeployerState = {
   deployPubkeyText: '',
   /** Last private key from "Generate" (memory only; cleared after save to credentials). */
   lastGeneratedPrivateKey: '',
+  /** `saved` = credential dropdown; `ephemeral` = one-time username/password (not stored). */
+  deployAuthMode: 'saved',
+  /** Remembered SSH username for one-time deploy (password is never stored). */
+  ephemeralUsername: '',
 };
 
 const REFRESH_INTERVAL_MS = 4000;
@@ -109,6 +113,15 @@ function bindContentEvents() {
     const id = el.dataset.id ? parseInt(el.dataset.id, 10) : null;
     el.onclick = () => runAction(action, id, el);
   });
+  const authModeEl = qs('#ssh-deploy-auth-mode');
+  if (authModeEl) {
+    authModeEl.onchange = () => {
+      sshDeployerState.deployAuthMode = authModeEl.value;
+      const u = qs('#ssh-ephemeral-user');
+      if (u) sshDeployerState.ephemeralUsername = u.value;
+      render();
+    };
+  }
 }
 
 // Delegate clicks so modal buttons (e.g. Close) work when added dynamically
@@ -197,7 +210,8 @@ function yamlInventoryFromIps(ips) {
 }
 
 function renderSshDeployer() {
-  const { cidr, hosts, selectedIps, deployPubkeyText, lastGeneratedPrivateKey } = sshDeployerState;
+  const { cidr, hosts, selectedIps, deployPubkeyText, lastGeneratedPrivateKey, deployAuthMode, ephemeralUsername } = sshDeployerState;
+  const authMode = deployAuthMode === 'ephemeral' ? 'ephemeral' : 'saved';
   const canSaveGenerated = !!(lastGeneratedPrivateKey && String(lastGeneratedPrivateKey).trim());
   const sel = selectedIps || {};
   const projectOpts = projects.length
@@ -276,13 +290,35 @@ function renderSshDeployer() {
             <label>Project</label>
             <select id="ssh-deploy-project">${projectOpts}</select>
           </div>
-          <div class="form-group" style="flex:1 1 260px">
-            <label>Login credential (SSH key or password)</label>
-            <select id="ssh-deploy-cred"><option value="">— Select —</option>${credOptsDeploy || '<option value="" disabled>No SSH/password credentials</option>'}</select>
+          <div class="form-group" style="flex:1 1 220px">
+            <label>Deploy login</label>
+            <select id="ssh-deploy-auth-mode">
+              <option value="saved" ${authMode === 'saved' ? 'selected' : ''}>Saved credential</option>
+              <option value="ephemeral" ${authMode === 'ephemeral' ? 'selected' : ''}>One-time username &amp; password (new host)</option>
+            </select>
           </div>
           <div class="form-group ssh-deploy-btn-wrap">
             <label class="invisible">.</label>
             <button type="button" class="btn btn-primary" data-action="ssh-deploy-keys">Deploy public key to selected hosts</button>
+          </div>
+        </div>
+        <div class="form-row ssh-deploy-cred-row ${authMode === 'ephemeral' ? 'hidden' : ''}">
+          <div class="form-group" style="flex:1 1 320px">
+            <label>Login credential (SSH key or password)</label>
+            <select id="ssh-deploy-cred"><option value="">— Select —</option>${credOptsDeploy || '<option value="" disabled>No SSH/password credentials</option>'}</select>
+          </div>
+        </div>
+        <div class="ssh-ephemeral-deploy ${authMode === 'saved' ? 'hidden' : ''}">
+          <p class="text-muted ssh-help" style="margin:0 0 8px">Uses <code>sshpass</code> on the Ansible server. Username and password are sent only for this request and are <strong>not</strong> saved.</p>
+          <div class="form-row">
+            <div class="form-group" style="flex:0 1 200px">
+              <label>SSH username</label>
+              <input type="text" id="ssh-ephemeral-user" class="ssh-ephemeral-input" autocomplete="username" placeholder="e.g. root or ubuntu" value="${escapeHtml(ephemeralUsername || '')}">
+            </div>
+            <div class="form-group" style="flex:1 1 260px">
+              <label>SSH password</label>
+              <input type="password" id="ssh-ephemeral-pass" class="ssh-ephemeral-input" autocomplete="current-password" placeholder="One-time — not stored">
+            </div>
           </div>
         </div>
         <p class="text-muted ssh-help">Max 32 hosts per run. Uses <code>ssh</code> to add one line to <code>~/.ssh/authorized_keys</code> only if that exact line is not already present. Password auth requires <code>sshpass</code> on the server.</p>
@@ -323,6 +359,8 @@ async function runSshScan() {
       selectedIps: nextSel,
       deployPubkeyText: sshDeployerState.deployPubkeyText || '',
       lastGeneratedPrivateKey: sshDeployerState.lastGeneratedPrivateKey || '',
+      deployAuthMode: sshDeployerState.deployAuthMode || 'saved',
+      ephemeralUsername: sshDeployerState.ephemeralUsername || '',
     };
     render();
   } catch (e) {
@@ -425,22 +463,39 @@ async function sshDeployPubkeys() {
   const public_key = (ta && ta.value ? ta.value : sshDeployerState.deployPubkeyText || '').trim();
   if (!public_key) { alert('Paste or generate a public key first.'); return; }
   const proj = qs('#ssh-deploy-project');
-  const credEl = qs('#ssh-deploy-cred');
   const project_id = proj ? parseInt(proj.value, 10) : 0;
-  const credential_id = credEl && credEl.value ? parseInt(credEl.value, 10) : 0;
-  const opt = credEl && credEl.selectedOptions && credEl.selectedOptions[0];
-  const credProject = opt && opt.dataset.projectId ? parseInt(opt.dataset.projectId, 10) : 0;
-  if (!project_id || !credential_id) { alert('Select project and login credential.'); return; }
-  if (credProject !== project_id) { alert('The credential must belong to the selected project.'); return; }
+  if (!project_id) { alert('Select a project.'); return; }
   const ips = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
     (sshDeployerState.hosts || []).some(h => h.ip === ip)
   );
   if (!ips.length) { alert('Select at least one host in the scan table.'); return; }
   if (ips.length > 32) { alert('Maximum 32 hosts per deploy. Narrow your selection.'); return; }
-  if (!confirm(`Append this public key to ~/.ssh/authorized_keys on ${ips.length} host(s) as user from credential (ansible_user / default root)? Identical lines are skipped.`)) return;
+
+  const mode = sshDeployerState.deployAuthMode === 'ephemeral' ? 'ephemeral' : 'saved';
+  let body;
+  if (mode === 'ephemeral') {
+    const user = (qs('#ssh-ephemeral-user')?.value || '').trim();
+    const passEl = qs('#ssh-ephemeral-pass');
+    const ephemeral_password = passEl ? passEl.value : '';
+    if (!user) { alert('Enter SSH username for one-time deploy.'); return; }
+    if (!ephemeral_password) { alert('Enter SSH password for one-time deploy.'); return; }
+    sshDeployerState.ephemeralUsername = user;
+    if (!confirm(`Append this public key to ~/.ssh/authorized_keys on ${ips.length} host(s) as ${user} using a one-time password (not saved)? Requires sshpass on the server. Identical lines are skipped.`)) return;
+    body = { project_id, ips, public_key, ephemeral_username: user, ephemeral_password };
+  } else {
+    const credEl = qs('#ssh-deploy-cred');
+    const credential_id = credEl && credEl.value ? parseInt(credEl.value, 10) : 0;
+    const opt = credEl && credEl.selectedOptions && credEl.selectedOptions[0];
+    const credProject = opt && opt.dataset.projectId ? parseInt(opt.dataset.projectId, 10) : 0;
+    if (!credential_id) { alert('Select a login credential, or switch to one-time username & password.'); return; }
+    if (credProject !== project_id) { alert('The credential must belong to the selected project.'); return; }
+    if (!confirm(`Append this public key to ~/.ssh/authorized_keys on ${ips.length} host(s) as user from credential (ansible_user / default root)? Identical lines are skipped.`)) return;
+    body = { project_id, credential_id, ips, public_key };
+  }
+
   const data = await fetchJSON(`${API}/ssh_deployer/deploy_pubkey`, {
     method: 'POST',
-    body: JSON.stringify({ project_id, credential_id, ips, public_key }),
+    body: JSON.stringify(body),
   });
   const rows = (data.results || []).map(r =>
     `<tr><td><code>${escapeHtml(r.ip)}</code></td><td>${r.ok ? '<span class="badge badge-success">ok</span>' : '<span class="badge badge-failed">fail</span>'}</td><td>${escapeHtml(r.detail)}</td></tr>`
@@ -1423,6 +1478,9 @@ document.addEventListener('change', (e) => {
 document.addEventListener('input', (e) => {
   if (e.target && e.target.id === 'ssh-deploy-pubkey') {
     sshDeployerState.deployPubkeyText = e.target.value;
+  }
+  if (e.target && e.target.id === 'ssh-ephemeral-user') {
+    sshDeployerState.ephemeralUsername = e.target.value;
   }
 });
 

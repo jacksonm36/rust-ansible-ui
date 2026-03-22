@@ -356,6 +356,30 @@ fn validate_public_key_line(pk: &str) -> Result<String, String> {
 #[cfg(unix)]
 const MAX_DEPLOY_HOSTS: usize = 32;
 
+/// Max length for one-time deploy password (request body abuse guard).
+#[cfg(unix)]
+const MAX_EPHEMERAL_PASSWORD_LEN: usize = 8192;
+
+#[cfg(unix)]
+fn validate_deploy_username(username: &str) -> Result<String, String> {
+    let user = username.trim();
+    if user.is_empty() {
+        return Err("SSH username is required.".into());
+    }
+    if user.len() > 256 {
+        return Err("SSH username is too long.".into());
+    }
+    if !user
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(
+            "SSH username: use letters, digits, and ._- only (same as ansible_user).".into(),
+        );
+    }
+    Ok(user.to_string())
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct DeployKeyResult {
     pub ip: String,
@@ -519,6 +543,54 @@ pub fn deploy_public_key_to_hosts(
     Ok(results)
 }
 
+/// Same as [`deploy_public_key_to_hosts`] but uses a **one-time** username/password (not read from credentials).
+/// For bootstrapping hosts before any SSH key is authorized. Requires `sshpass` on the server. Password is not stored.
+#[cfg(unix)]
+pub fn deploy_public_key_ephemeral_password(
+    db: &DbPool,
+    project_id: i64,
+    ips: Vec<String>,
+    public_key: &str,
+    username: &str,
+    password: &str,
+) -> Result<Vec<DeployKeyResult>, String> {
+    if crud::get_project(db, project_id).is_none() {
+        return Err("Project not found".into());
+    }
+    let user = validate_deploy_username(username)?;
+    if password.is_empty() {
+        return Err("SSH password is required for one-time deploy.".into());
+    }
+    if password.len() > MAX_EPHEMERAL_PASSWORD_LEN {
+        return Err("SSH password is too long.".into());
+    }
+    let pk = validate_public_key_line(public_key)?;
+    if ips.is_empty() {
+        return Err("ips is empty".into());
+    }
+    if ips.len() > MAX_DEPLOY_HOSTS {
+        return Err(format!("Too many hosts (max {MAX_DEPLOY_HOSTS})"));
+    }
+    for ip in &ips {
+        ip.parse::<Ipv4Addr>()
+            .map_err(|_| format!("Invalid IPv4 address: {ip}"))?;
+    }
+
+    let mut results = Vec::new();
+    for ip in ips {
+        let res = append_pubkey_via_ssh(true, Some(password), None, &user, &ip, &pk);
+        results.push(DeployKeyResult {
+            detail: match &res {
+                Ok(()) => "ok".into(),
+                Err(e) => e.clone(),
+            },
+            ip,
+            ok: res.is_ok(),
+        });
+    }
+    Ok(results)
+}
+
 #[cfg(not(unix))]
 pub fn deploy_public_key_to_hosts(
     _db: &DbPool,
@@ -526,6 +598,18 @@ pub fn deploy_public_key_to_hosts(
     _credential_id: i64,
     _ips: Vec<String>,
     _public_key: &str,
+) -> Result<Vec<DeployKeyResult>, String> {
+    Err("Deploy is only supported on Linux and macOS".into())
+}
+
+#[cfg(not(unix))]
+pub fn deploy_public_key_ephemeral_password(
+    _db: &DbPool,
+    _project_id: i64,
+    _ips: Vec<String>,
+    _public_key: &str,
+    _username: &str,
+    _password: &str,
 ) -> Result<Vec<DeployKeyResult>, String> {
     Err("Deploy is only supported on Linux and macOS".into())
 }
