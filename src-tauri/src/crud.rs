@@ -212,8 +212,35 @@ pub fn update_inventory(db: &DbPool, id: i64, data: &InventoryUpdate) -> Option<
     })
 }
 
+/// Removes an inventory. Job templates that referenced it get `inventory_id` cleared first
+/// (FK is `ON DELETE RESTRICT` on `job_templates.inventory_id`).
 pub fn delete_inventory(db: &DbPool, id: i64) -> bool {
-    conn(db).execute("DELETE FROM inventories WHERE id = ?1", params![id]).ok().map(|n| n > 0).unwrap_or(false)
+    let mut c = conn(db);
+    let Ok(tx) = c.transaction() else {
+        return false;
+    };
+    if tx
+        .execute(
+            "UPDATE job_templates SET inventory_id = NULL WHERE inventory_id = ?1",
+            params![id],
+        )
+        .is_err()
+    {
+        let _ = tx.rollback();
+        return false;
+    }
+    let deleted = match tx.execute("DELETE FROM inventories WHERE id = ?1", params![id]) {
+        Ok(n) => n,
+        Err(_) => {
+            let _ = tx.rollback();
+            return false;
+        }
+    };
+    if deleted == 0 {
+        let _ = tx.rollback();
+        return false;
+    }
+    tx.commit().is_ok()
 }
 
 // --- Credentials ---

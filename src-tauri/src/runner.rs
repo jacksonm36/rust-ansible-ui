@@ -238,6 +238,21 @@ fn build_credential_extra_vars_yaml(ssh_password: Option<&str>, credential_extra
     }
 }
 
+/// True if credential **Extra** defines a non-empty `ansible_user:` (YAML-style line).
+fn credential_extra_has_ansible_user(extra: &str) -> bool {
+    let extra = normalize_ansible_text(extra.trim());
+    for line in extra.lines() {
+        let t = line.trim();
+        if let Some(v) = t.strip_prefix("ansible_user:") {
+            let u = v.trim().trim_matches('"').trim_matches('\'');
+            if !u.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 const SCRIPT_EXTENSIONS: &[(&str, &[&str])] = &[
     (".sh", &["bash"]),
     (".bash", &["bash"]),
@@ -618,12 +633,24 @@ pub fn run_playbook(p: PlaybookRunParams<'_>) -> (String, String) {
     let cwd = playbook_abs.parent().unwrap_or(Path::new("."));
     let mut cmd = Command::new("ansible-playbook");
     cmd.args(&args).current_dir(cwd);
+    // Ansible defaults the SSH user to the control-node account (e.g. ansible-ui under systemd).
+    // "Deploy public key" targets root when Extra omits ansible_user — match that for playbook runs
+    // so key-based jobs work without duplicating ansible_user everywhere. Per-host inventory
+    // `ansible_user` still overrides ANSIBLE_REMOTE_USER.
+    let inherited_remote = std::env::var("ANSIBLE_REMOTE_USER")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if let Ok(u) = std::env::var("ANSIBLE_UI_REMOTE_USER") {
         let u = u.trim();
         if !u.is_empty() {
-            // Default remote user when inventory omits ansible_user (systemd runs as ansible-ui).
             cmd.env("ANSIBLE_REMOTE_USER", u);
         }
+    } else if inherited_remote.is_none()
+        && (p.ssh_key.is_some() || p.ssh_password.is_some())
+        && !credential_extra_has_ansible_user(p.credential_extra)
+    {
+        cmd.env("ANSIBLE_REMOTE_USER", "root");
     }
     let host_key_check =
         std::env::var("ANSIBLE_HOST_KEY_CHECKING").unwrap_or_else(|_| "False".into());

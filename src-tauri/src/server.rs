@@ -698,10 +698,16 @@ async fn update_inventory(State(state): State<AppState>, Path(id): Path<i64>, Js
 }
 
 async fn delete_inventory(State(state): State<AppState>, Path(id): Path<i64>) -> Result<StatusCode, Response> {
-    if !crud::delete_inventory(&state.db, id) {
+    if crud::delete_inventory(&state.db, id) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if crud::get_inventory(&state.db, id).is_none() {
         return Err(api_err(StatusCode::NOT_FOUND, "Inventory not found"));
     }
-    Ok(StatusCode::NO_CONTENT)
+    Err(api_err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Could not delete inventory (database error).",
+    ))
 }
 
 // --- Credentials ---
