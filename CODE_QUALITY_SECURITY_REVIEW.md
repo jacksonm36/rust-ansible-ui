@@ -1,7 +1,7 @@
 # Code quality & security review (rust-ansible-ui)
 
 **Scope:** `src-tauri` server (`ansible-server`), static UI, deploy scripts.  
-**Last updated:** 2026-03-21
+**Last updated:** 2026-03-17
 
 ---
 
@@ -29,10 +29,14 @@
 - CORS allow-list by default; optional explicit origins via `ANSIBLE_UI_EXTRA_ORIGINS`.
 - Inventory / credential YAML text normalized (CRLF, BOM, NUL) before Ansible to avoid subtle SSH/parser issues.
 - `database_parent_dir()` in `secrets.rs` aligned with `db::db_path()` for correct keyfile placement with `sqlite:///...` URLs.
+- **`POST /api/ssh_deployer/scan`:** global `tokio::sync::Semaphore(1)` so only **one ICMP scan runs at a time** (extra requests wait in queue instead of multiplying process load).
+- **`POST /api/ssh_deployer/public_key`:** JSON must include **`project_id`**; server checks the project exists and the credential belongs to that project. Wrong project returns **404** with the same message as a missing credential to reduce ID enumeration.
+- **Playbook listing:** `playbook_discovery::PlaybookListError` distinguishes missing project vs I/O instead of string-matching errors.
 
 ### Frontend
 
 - User-controlled strings in tables/modals generally passed through `escapeHtml` before `innerHTML`.
+- Job status CSS classes use **`jobStatusBadgeClass()`** (allow-list: `pending` / `running` / `success` / `failed`) so raw API values are not interpolated into `class` attributes.
 - Remaining XSS risk is low for same-origin API data but **any new `innerHTML` without escaping is high risk**.
 
 ---

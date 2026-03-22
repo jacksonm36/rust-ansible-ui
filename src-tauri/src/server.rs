@@ -3,7 +3,9 @@
 use crate::crud;
 use crate::db::DbPool;
 use crate::git_support;
+use crate::playbook_discovery;
 use crate::runner;
+use crate::ssh_deployer;
 use crate::schemas::*;
 use crate::secrets;
 use axum::{
@@ -24,6 +26,11 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
+
+lazy_static::lazy_static! {
+    /// Only one ICMP scan at a time so many parallel requests cannot fork unlimited load.
+    static ref SSH_SCAN_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::new(1);
+}
 
 #[cfg(feature = "embedded-static")]
 #[derive(rust_embed::RustEmbed)]
@@ -284,6 +291,92 @@ async fn pull_project(State(state): State<AppState>, Path(id): Path<i64>) -> Res
     ).map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
     let playbooks = git_support::list_playbooks_in_repo(&repo_path);
     Ok(Json(PullResponse { ok: true, message: "Pulled successfully.".into(), playbooks }))
+}
+
+#[derive(serde::Serialize)]
+struct ProjectPlaybooksResponse {
+    /// Under `workspace/project_<id>/` (Git clone).
+    workspace: Vec<String>,
+    /// Under the server process current working directory (optional local files).
+    cwd: Vec<String>,
+}
+
+async fn get_project_playbooks(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<ProjectPlaybooksResponse>, Response> {
+    let workspace = playbook_discovery::list_playbooks_for_project(&state.db, id).map_err(|e| {
+        match e {
+            playbook_discovery::PlaybookListError::ProjectNotFound => {
+                api_err(StatusCode::NOT_FOUND, "Project not found")
+            }
+            playbook_discovery::PlaybookListError::Io(msg) => {
+                api_err(StatusCode::INTERNAL_SERVER_ERROR, &msg)
+            }
+        }
+    })?;
+    let cwd = playbook_discovery::list_playbooks_from_cwd().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "list_playbooks_from_cwd failed; returning empty cwd list");
+        vec![]
+    });
+    Ok(Json(ProjectPlaybooksResponse { workspace, cwd }))
+}
+
+#[derive(serde::Deserialize)]
+struct SshScanBody {
+    cidr: String,
+}
+
+#[derive(serde::Serialize)]
+struct SshScanResponse {
+    hosts: Vec<ssh_deployer::ScanHost>,
+}
+
+async fn ssh_deployer_scan(Json(body): Json<SshScanBody>) -> Result<Json<SshScanResponse>, Response> {
+    let _permit = SSH_SCAN_SEM
+        .acquire()
+        .await
+        .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "scan lock unavailable"))?;
+    let cidr = body.cidr;
+    let hosts = tokio::task::spawn_blocking(move || ssh_deployer::scan_cidr(&cidr))
+        .await
+        .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "scan task failed"))?
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+    Ok(Json(SshScanResponse { hosts }))
+}
+
+#[derive(serde::Deserialize)]
+struct SshPubKeyBody {
+    credential_id: i64,
+    /// Must match the credential’s project (mitigates blind credential-id probing).
+    project_id: i64,
+}
+
+#[derive(serde::Serialize)]
+struct SshPubKeyResponse {
+    public_key: String,
+}
+
+async fn ssh_deployer_public_key(
+    State(state): State<AppState>,
+    Json(body): Json<SshPubKeyBody>,
+) -> Result<Json<SshPubKeyResponse>, Response> {
+    let db = state.db.clone();
+    let cred_id = body.credential_id;
+    let project_id = body.project_id;
+    let public_key = tokio::task::spawn_blocking(move || {
+        ssh_deployer::ssh_public_key_for_credential(&db, cred_id, project_id)
+    })
+    .await
+    .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
+    .map_err(|e| {
+        if matches!(e.as_str(), "Project not found" | "Credential not found") {
+            api_err(StatusCode::NOT_FOUND, &e)
+        } else {
+            api_err(StatusCode::BAD_REQUEST, &e)
+        }
+    })?;
+    Ok(Json(SshPubKeyResponse { public_key }))
 }
 
 // --- Inventories ---
@@ -692,7 +785,10 @@ fn api_routes(state: AppState) -> Router<AppState> {
         .route("/projects", get(list_projects).post(create_project))
         // matchit 0.7 (used by axum 0.7) requires `:param`, not `{param}` — braces are literal.
         .route("/projects/:id/pull", post(pull_project))
+        .route("/projects/:id/playbooks", get(get_project_playbooks))
         .route("/projects/:id", get(get_project).patch(update_project).delete(delete_project))
+        .route("/ssh_deployer/scan", post(ssh_deployer_scan))
+        .route("/ssh_deployer/public_key", post(ssh_deployer_public_key))
         .route("/inventories", get(list_inventories).post(create_inventory))
         .route("/inventories/:id", get(get_inventory).patch(update_inventory).delete(delete_inventory))
         .route("/credentials", get(list_credentials).post(create_credential))

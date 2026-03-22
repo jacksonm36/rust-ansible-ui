@@ -3,7 +3,9 @@
 mod crud;
 pub mod db;
 mod git_support;
+mod playbook_discovery;
 mod runner;
+mod ssh_deployer;
 mod schemas;
 pub mod scheduler;
 mod secrets;

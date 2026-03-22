@@ -66,6 +66,11 @@ fn workspace_path(project_id: i64) -> PathBuf {
     ws.join(format!("project_{}", project_id))
 }
 
+/// Per-project clone directory (`workspace/project_<id>`). Used to discover playbooks and match Git layout.
+pub fn project_workspace_path(project_id: i64) -> PathBuf {
+    workspace_path(project_id)
+}
+
 lazy_static::lazy_static! {
     static ref BRANCH_RE: Regex = Regex::new(r"^[a-zA-Z0-9._\-/]+$").unwrap();
 }

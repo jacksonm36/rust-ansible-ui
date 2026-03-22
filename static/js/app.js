@@ -32,6 +32,9 @@ let credentials = [];
 let jobTemplates = [];
 let jobs = [];
 
+/** SSH Key Deployer: last scan CIDR + results */
+let sshDeployerState = { cidr: '192.168.1.0/24', hosts: [] };
+
 const REFRESH_INTERVAL_MS = 4000;
 let refreshIntervalId = null;
 let jobPollIntervalId = null;
@@ -82,6 +85,7 @@ function render() {
   else if (currentPage === 'credentials') content.innerHTML = renderCredentials();
   else if (currentPage === 'templates') content.innerHTML = renderTemplates();
   else if (currentPage === 'jobs') content.innerHTML = renderJobs();
+  else if (currentPage === 'ssh-deployer') content.innerHTML = renderSshDeployer();
   bindContentEvents();
 }
 
@@ -117,14 +121,19 @@ function runAction(action, id, el) {
   if (action === 'create-credential') openCredentialModal();
   if (action === 'edit-credential') openCredentialModal(id);
   if (action === 'delete-credential') deleteCredential(id);
-  if (action === 'create-template') openTemplateModal();
-  if (action === 'edit-template') openTemplateModal(id);
+  if (action === 'create-template') { openTemplateModal().catch(showError); return; }
+  if (action === 'edit-template') { openTemplateModal(id).catch(showError); return; }
   if (action === 'delete-template') deleteTemplate(id);
   if (action === 'launch-job') launchJob(id);
   if (action === 'view-job') viewJob(id);
   if (action === 'delete-job') deleteJob(id);
   if (action === 'delete-job-history') deleteJobHistory();
   if (action === 'pull-project') pullProject(id);
+  if (action === 'ssh-scan') { runSshScan().catch(showError); return; }
+  if (action === 'ssh-select-reachable') { sshSelectReachable(true); return; }
+  if (action === 'ssh-select-none') { sshSelectReachable(false); return; }
+  if (action === 'ssh-show-pubkey') { showSshPublicKeyModal().catch(showError); return; }
+  if (action === 'ssh-add-inventory') { addScannedHostsToInventory(); return; }
 }
 
 function renderDashboard() {
@@ -150,7 +159,7 @@ function renderDashboard() {
               <tr>
                 <td>${j.id}</td>
                 <td>${escapeHtml(j.playbook_path)}</td>
-                <td><span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span></td>
+                <td><span class="badge badge-${jobStatusBadgeClass(j.status)}">${escapeHtml(j.status)}</span></td>
                 <td>${j.started_at ? new Date(j.started_at).toLocaleString() : '—'}</td>
                 <td><button class="btn btn-sm btn-secondary" data-action="view-job" data-id="${j.id}">View</button></td>
               </tr>
@@ -160,6 +169,137 @@ function renderDashboard() {
       </div>
     </div>
   `;
+}
+
+function yamlInventoryFromIps(ips) {
+  if (!ips.length) return '[scanned]\n';
+  const lines = ['all:', '  children:', '    scanned:', '      hosts:'];
+  ips.forEach(ip => {
+    const hid = 'h' + ip.replace(/\./g, '_');
+    lines.push(`        ${hid}:`);
+    lines.push(`          ansible_host: ${ip}`);
+  });
+  return lines.join('\n');
+}
+
+function renderSshDeployer() {
+  const { cidr, hosts } = sshDeployerState;
+  const projectOpts = projects.length
+    ? projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
+    : '<option value="">No projects</option>';
+  const credOpts = credentials.filter(c => c.kind === 'ssh').map(c =>
+    `<option value="${c.id}" data-project-id="${c.project_id}">${escapeHtml(c.name)} (project ${c.project_id})</option>`).join('');
+  const rows = hosts.length
+    ? hosts.map(h => `
+      <tr>
+        <td><input type="checkbox" class="ssh-host-cb" data-ip="${escapeHtml(h.ip)}"></td>
+        <td><code>${escapeHtml(h.ip)}</code></td>
+        <td>${h.alive ? '<span class="badge badge-success">reachable</span>' : '<span class="badge badge-pending">no reply</span>'}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="3" class="empty-state">Run a scan to list addresses (ICMP from the server). Max 1024 hosts per scan.</td></tr>';
+  return `
+    <h1 class="page-title">SSH Key Deployer</h1>
+    <p class="text-muted">Discover hosts on your LAN from <strong>this server</strong>, add them to an inventory, then use an SSH credential + job template to run Ansible (e.g. <code>authorized_key</code>) or paste your public key manually.</p>
+    <div class="card">
+      <div class="card-header">Network scan</div>
+      <div style="padding:1rem;">
+        <div class="form-group">
+          <label>IPv4 CIDR</label>
+          <input type="text" id="ssh-cidr" value="${escapeHtml(cidr)}" placeholder="192.168.1.0/24" style="max-width:320px;">
+        </div>
+        <button type="button" class="btn btn-primary" data-action="ssh-scan">Scan network</button>
+        <span class="text-muted" style="margin-left:12px;">Uses OS <code>ping</code>. Many hosts block ICMP; unreachable ≠ down.</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">Scan results</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th style="width:44px"></th><th>Address</th><th>ICMP</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="padding:0.75rem 1rem;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button type="button" class="btn btn-sm btn-secondary" data-action="ssh-select-reachable">Select reachable</button>
+        <button type="button" class="btn btn-sm btn-secondary" data-action="ssh-select-none">Clear</button>
+        <span style="flex:1"></span>
+        <label class="text-muted">Project</label>
+        <select id="ssh-inv-project">${projectOpts}</select>
+        <button type="button" class="btn btn-sm btn-primary" data-action="ssh-add-inventory">Add selected to inventory…</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">SSH public key (from credential)</div>
+      <div style="padding:1rem;">
+        <p class="text-muted">Derives the public line with <code>ssh-keygen -y</code> on the server (OpenSSH required).</p>
+        <div class="form-group">
+          <label>SSH private key credential</label>
+          <select id="ssh-cred"><option value="">— Select —</option>${credOpts || '<option value="" disabled>No SSH credentials</option>'}</select>
+        </div>
+        <button type="button" class="btn btn-secondary" data-action="ssh-show-pubkey">Show public key &amp; tips</button>
+      </div>
+    </div>
+  `;
+}
+
+async function runSshScan() {
+  const input = qs('#ssh-cidr');
+  const cidr = input ? input.value.trim() : '';
+  if (!cidr) { alert('Enter an IPv4 CIDR (e.g. 192.168.1.0/24).'); return; }
+  const btn = qs('[data-action="ssh-scan"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  try {
+    const data = await fetchJSON(`${API}/ssh_deployer/scan`, { method: 'POST', body: JSON.stringify({ cidr }) });
+    sshDeployerState = { cidr, hosts: data.hosts || [] };
+    render();
+  } catch (e) {
+    showError(e);
+  } finally {
+    const b2 = qs('[data-action="ssh-scan"]');
+    if (b2) { b2.disabled = false; b2.textContent = 'Scan network'; }
+  }
+}
+
+function sshSelectReachable(onlyAlive) {
+  const alive = new Set((sshDeployerState.hosts || []).filter(h => h.alive).map(h => h.ip));
+  qsAll('.ssh-host-cb').forEach(cb => {
+    const ip = cb.dataset.ip;
+    if (onlyAlive) cb.checked = alive.has(ip);
+    else cb.checked = false;
+  });
+}
+
+function addScannedHostsToInventory() {
+  const selected = [...qsAll('.ssh-host-cb:checked')].map(cb => cb.dataset.ip).filter(Boolean);
+  if (!selected.length) { alert('Select at least one host.'); return; }
+  const sel = qs('#ssh-inv-project');
+  const project_id = sel ? parseInt(sel.value, 10) : NaN;
+  if (!project_id) { alert('Choose a project.'); return; }
+  const content = yamlInventoryFromIps(selected);
+  const suggestName = `scanned-${new Date().toISOString().slice(0, 10)}`;
+  openInventoryModal(null, { project_id, content, suggestName });
+}
+
+async function showSshPublicKeyModal() {
+  const sel = qs('#ssh-cred');
+  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+  const credential_id = sel && sel.value ? parseInt(sel.value, 10) : 0;
+  const project_id = opt && opt.dataset.projectId ? parseInt(opt.dataset.projectId, 10) : 0;
+  if (!credential_id || !project_id) { alert('Select an SSH private key credential.'); return; }
+  const data = await fetchJSON(`${API}/ssh_deployer/public_key`, {
+    method: 'POST',
+    body: JSON.stringify({ credential_id, project_id }),
+  });
+  const pk = data.public_key;
+  showModal(
+    'SSH public key',
+    `<p>Add this line to <code>~/.ssh/authorized_keys</code> on each target (for the user you SSH as).</p>
+     <textarea readonly style="width:100%;min-height:80px;font-family:monospace;font-size:12px;">${escapeHtml(pk)}</textarea>
+     <p class="text-muted" style="margin-top:12px;">From your workstation (if you have password SSH access):</p>
+     <pre style="overflow:auto;font-size:12px;background:var(--bg-elevated);padding:8px;border-radius:4px;">ssh-copy-id -i ~/.ssh/your_key.pub user@host</pre>
+     <p class="text-muted">Or use Ansible <code>authorized_key</code> with a password credential in a job template.</p>`,
+    '<button class="btn btn-secondary" data-action="close-modal">Close</button>'
+  );
 }
 
 function renderProjects() {
@@ -308,7 +448,7 @@ function renderJobs() {
               <tr>
                 <td>${j.id}</td>
                 <td>${escapeHtml(j.playbook_path)}</td>
-                <td><span class="badge badge-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span></td>
+                <td><span class="badge badge-${jobStatusBadgeClass(j.status)}">${escapeHtml(j.status)}</span></td>
                 <td>${j.started_at ? new Date(j.started_at).toLocaleString() : '—'}</td>
                 <td>${j.finished_at ? new Date(j.finished_at).toLocaleString() : '—'}</td>
                 <td>
@@ -329,6 +469,14 @@ function escapeHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
+}
+
+const JOB_STATUS_BADGES = new Set(['pending', 'running', 'success', 'failed']);
+
+/** Safe suffix for <span class="badge badge-*"> — never put raw API strings in class names. */
+function jobStatusBadgeClass(status) {
+  const s = typeof status === 'string' ? status : '';
+  return JOB_STATUS_BADGES.has(s) ? s : 'pending';
 }
 
 function extractAnsibleUser(extra) {
@@ -506,29 +654,32 @@ function openProjectModal(id) {
   };
 }
 
-function openInventoryModal(id) {
+function openInventoryModal(id, opts = {}) {
   const inv = id ? inventories.find(x => x.id === id) : null;
+  const initialContent = inv ? inv.content : (opts.content ?? '');
+  const defaultName = inv ? inv.name : (opts.suggestName || '');
+  const selectedPid = inv ? inv.project_id : opts.project_id;
   showModal(
     inv ? 'Edit Inventory' : 'New Inventory',
     `
       <div class="form-group">
         <label>Project</label>
-        <select id="modal-inv-project">${projects.map(p => `<option value="${p.id}" ${inv && inv.project_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select>
+        <select id="modal-inv-project">${projects.map(p => `<option value="${p.id}" ${p.id === selectedPid ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select>
       </div>
       <div class="form-group">
         <label>Name</label>
-        <input type="text" id="modal-name" value="${inv ? escapeHtml(inv.name) : ''}" placeholder="Inventory name">
+        <input type="text" id="modal-name" value="${escapeHtml(defaultName)}" placeholder="Inventory name">
       </div>
       <div class="form-group">
         <label>Content (INI or YAML)</label>
-        <textarea id="modal-content" placeholder="[all]\nhost1\nhost2" style="min-height:180px">${inv ? escapeHtml(inv.content) : ''}</textarea>
+        <textarea id="modal-content" placeholder="[all]\nhost1\nhost2" style="min-height:180px">${escapeHtml(initialContent)}</textarea>
       </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
      <button class="btn btn-primary" id="modal-save-inv" data-id="${id || ''}">Save</button>`
   );
   const sel = qs('#modal-inv-project');
-  if (!inv && projects[0]) sel.value = projects[0].id;
+  if (!inv && projects[0] && (selectedPid == null || selectedPid === undefined)) sel.value = projects[0].id;
   qs('#modal-save-inv').onclick = async () => {
     const name = qs('#modal-name').value.trim();
     const project_id = parseInt(sel.value, 10);
@@ -650,10 +801,11 @@ function openCredentialModal(id) {
   };
 }
 
-function openTemplateModal(id) {
+async function openTemplateModal(id) {
   const jt = id ? jobTemplates.find(x => x.id === id) : null;
   const invOptions = inventories.map(inv => `<option value="${inv.id}" ${jt && jt.inventory_id === inv.id ? 'selected' : ''}>${escapeHtml(inv.name)} (${inv.project_id})</option>`).join('');
   const credOptions = credentials.map(c => `<option value="${c.id}" ${jt && jt.credential_id === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+  const savedPath = jt ? jt.playbook_path : '';
   showModal(
     jt ? 'Edit Job Template' : 'New Job Template',
     `
@@ -667,7 +819,9 @@ function openTemplateModal(id) {
       </div>
       <div class="form-group">
         <label>Playbook or script path</label>
-        <input type="text" id="modal-playbook" value="${jt ? escapeHtml(jt.playbook_path) : ''}" placeholder="e.g. playbook.yml (Ansible) or clamscan.sh (script)">
+        <select id="modal-playbook-select"><option value="">— Loading… —</option></select>
+        <input type="text" id="modal-playbook-custom" placeholder="Custom path (e.g. subdir/site.yml or script.sh)" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;">
+        <small class="text-muted">Lists files from the project workspace after <strong>Pull</strong>, plus paths under the server working directory. Pick <em>Custom path…</em> to type any path.</small>
       </div>
       <div class="form-group">
         <label>Inventory</label>
@@ -814,9 +968,65 @@ function openTemplateModal(id) {
   tzSelect.onchange = () => { tzOther.style.display = tzSelect.value === '__other__' ? 'inline-block' : 'none'; updateSummary(); };
   toggleScheduleUI();
 
+  async function refreshPlaybookSelect() {
+    const pid = parseInt(qs('#modal-tpl-project').value, 10);
+    const sel = qs('#modal-playbook-select');
+    const custom = qs('#modal-playbook-custom');
+    sel.innerHTML = '<option value="">— Loading… —</option>';
+    try {
+      const data = await fetchJSON(`${API}/projects/${pid}/playbooks`);
+      const ws = data.workspace || [];
+      const cwdList = data.cwd || [];
+      let html = '<option value="">— Select playbook or script —</option>';
+      if (ws.length) {
+        html += '<optgroup label="Project workspace (Git)">';
+        ws.forEach(p => { html += `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`; });
+        html += '</optgroup>';
+      }
+      if (cwdList.length) {
+        html += '<optgroup label="Server working directory">';
+        cwdList.forEach(p => { html += `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`; });
+        html += '</optgroup>';
+      }
+      html += '<option value="__custom__">Custom path…</option>';
+      sel.innerHTML = html;
+      const allPaths = [...ws, ...cwdList];
+      if (savedPath && allPaths.includes(savedPath)) sel.value = savedPath;
+      else if (savedPath) {
+        sel.value = '__custom__';
+        custom.value = savedPath;
+        custom.style.display = 'block';
+      } else {
+        custom.style.display = 'none';
+        custom.value = '';
+      }
+    } catch (e) {
+      console.error(e);
+      sel.innerHTML = '<option value="">— Could not list playbooks —</option><option value="__custom__">Custom path…</option>';
+      if (savedPath) {
+        sel.value = '__custom__';
+        custom.value = savedPath;
+        custom.style.display = 'block';
+      }
+    }
+    sel.onchange = () => {
+      if (sel.value === '__custom__') {
+        custom.style.display = 'block';
+        if (!custom.value.trim() && savedPath) custom.value = savedPath;
+      } else {
+        custom.style.display = 'none';
+      }
+    };
+  }
+
+  qs('#modal-tpl-project').addEventListener('change', () => { refreshPlaybookSelect().catch(console.error); });
+  await refreshPlaybookSelect();
+
   qs('#modal-save-tpl').onclick = async () => {
     const name = qs('#modal-name').value.trim();
-    const playbook_path = qs('#modal-playbook').value.trim();
+    const selPb = qs('#modal-playbook-select');
+    const customPb = qs('#modal-playbook-custom');
+    const playbook_path = selPb.value === '__custom__' ? customPb.value.trim() : selPb.value.trim();
     const project_id = parseInt(qs('#modal-tpl-project').value, 10);
     const invVal = qs('#modal-inv').value;
     const credVal = qs('#modal-cred').value;
@@ -916,7 +1126,7 @@ async function deleteJobHistory() {
 function jobModalBody(job) {
   return `
     <p><strong>Playbook:</strong> ${escapeHtml(job.playbook_path)}</p>
-    <p><strong>Status:</strong> <span class="badge badge-${escapeHtml(job.status)}">${escapeHtml(job.status)}</span></p>
+    <p><strong>Status:</strong> <span class="badge badge-${jobStatusBadgeClass(job.status)}">${escapeHtml(job.status)}</span></p>
     <p><strong>Started:</strong> ${job.started_at ? new Date(job.started_at).toLocaleString() : '—'}</p>
     <p><strong>Finished:</strong> ${job.finished_at ? new Date(job.finished_at).toLocaleString() : '—'}</p>
     <div class="form-group">
@@ -970,6 +1180,18 @@ async function loadForPage(page = currentPage) {
     }
 
     projects = await fetchJSON(`${API}/projects`);
+
+    if (page === 'ssh-deployer') {
+      inventories = [];
+      credentials = [];
+      for (const p of projects) {
+        const invList = await fetchJSON(`${API}/inventories?project_id=${p.id}`);
+        inventories.push(...invList);
+        const credList = await fetchJSON(`${API}/credentials?project_id=${p.id}`);
+        credentials.push(...credList);
+      }
+      return;
+    }
 
     // Keep arrays fresh only for pages that need them.
     if (page === 'dashboard' || page === 'templates') {
