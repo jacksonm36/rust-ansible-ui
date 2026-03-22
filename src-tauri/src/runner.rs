@@ -143,8 +143,48 @@ fn rewrite_bare_ip_lines_to_ini(s: &str) -> Option<String> {
     Some(ini)
 }
 
+/// Under `hosts:` each entry must be a **host name** (key), then vars like `ansible_host:` beneath it.
+/// Fix common mistake: `hosts:` immediately followed by `ansible_host:` (no host key).
+fn fix_hosts_direct_ansible_host(content: &str) -> String {
+    let lines: Vec<String> = content.lines().map(String::from).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == "hosts:" && i + 1 < lines.len() {
+            let trimmed_next = lines[i + 1].trim();
+            if let Some(rest) = trimmed_next.strip_prefix("ansible_host:") {
+                let ip = rest
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
+                if token_is_ipv4_host(ip) {
+                    out.push(lines[i].clone());
+                    let hosts_indent = lines[i].chars().take_while(|c| *c == ' ').count();
+                    out.push(format!(
+                        "{}\"{}\":",
+                        " ".repeat(hosts_indent.saturating_add(2)),
+                        ip
+                    ));
+                    out.push(lines[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(lines[i].clone());
+        i += 1;
+    }
+    out.join("\n")
+}
+
 fn sanitize_inventory_content(s: &str) -> String {
     let mut out = normalize_ansible_text(s);
+    for _ in 0..16 {
+        let fixed = fix_hosts_direct_ansible_host(&out);
+        if fixed == out {
+            break;
+        }
+        out = fixed;
+    }
     if let Some(ini) = rewrite_bare_ip_lines_to_ini(&out) {
         out = ini;
     }

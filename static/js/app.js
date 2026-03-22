@@ -926,7 +926,8 @@ function openInventoryModal(id, opts = {}) {
       </div>
       <div class="form-group">
         <label>Content (INI or YAML)</label>
-        <textarea id="modal-content" placeholder="[all]\nhost1\nhost2" style="min-height:180px">${escapeHtml(initialContent)}</textarea>
+        <textarea id="modal-content" placeholder="[scanned]&#10;192.168.1.10" style="min-height:180px">${escapeHtml(initialContent)}</textarea>
+        <small class="text-muted">YAML: under <code>hosts:</code> you need a <strong>host name</strong> (or quoted IP), then variables — e.g. <code>&quot;192.168.1.247&quot;:</code> then <code>ansible_host: 192.168.1.247</code>. Not <code>hosts:</code> → <code>ansible_host:</code> directly.</small>
       </div>
     `,
     `<button class="btn btn-secondary" data-action="close-modal">Cancel</button>
