@@ -85,6 +85,77 @@ fn credential_kind_ok(kind: &str) -> bool {
     matches!(kind, "ssh" | "password" | "vault" | "git")
 }
 
+/// Limits oversized credential payloads (abuse / accidental huge pastes / DB bloat).
+const MAX_CREDENTIAL_NAME_LEN: usize = 256;
+const MAX_CREDENTIAL_EXTRA_LEN: usize = 16 * 1024;
+const MAX_CREDENTIAL_SECRET_BYTES: usize = 512 * 1024;
+
+fn validate_credential_create(data: &mut CredentialCreate) -> Result<(), Response> {
+    data.name = data.name.trim().to_string();
+    if data.name.is_empty() {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Credential name is required.",
+        ));
+    }
+    if data.name.len() > MAX_CREDENTIAL_NAME_LEN {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Credential name is too long (max 256 characters).",
+        ));
+    }
+    if let Some(ref ex) = data.extra {
+        if ex.len() > MAX_CREDENTIAL_EXTRA_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Credential extra is too long (max 16 KiB).",
+            ));
+        }
+    }
+    if data.secret.len() > MAX_CREDENTIAL_SECRET_BYTES {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Credential secret is too large (max 512 KiB).",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_credential_update(data: &CredentialUpdate) -> Result<(), Response> {
+    if let Some(ref n) = data.name {
+        let t = n.trim();
+        if t.is_empty() {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Credential name cannot be empty.",
+            ));
+        }
+        if t.len() > MAX_CREDENTIAL_NAME_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Credential name is too long (max 256 characters).",
+            ));
+        }
+    }
+    if let Some(ref ex) = data.extra {
+        if ex.len() > MAX_CREDENTIAL_EXTRA_LEN {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Credential extra is too long (max 16 KiB).",
+            ));
+        }
+    }
+    if let Some(ref sec) = data.secret {
+        if sec.len() > MAX_CREDENTIAL_SECRET_BYTES {
+            return Err(api_err(
+                StatusCode::BAD_REQUEST,
+                "Credential secret is too large (max 512 KiB).",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// rust_embed keys must be relative, single-file paths (no `..`, no absolute).
 #[cfg(feature = "embedded-static")]
 fn safe_embedded_asset_path(path: &str) -> bool {
@@ -138,12 +209,18 @@ fn embedded_file_response(path: &str) -> Response {
     match EmbeddedStatic::get(path) {
         Some(f) => {
             let mime = mime_for_path(path);
-            Response::builder()
+            match Response::builder()
                 .status(StatusCode::OK)
                 .header(http_header::CONTENT_TYPE, mime)
                 .body(Body::from(f.data.into_owned()))
-                .unwrap()
-                .into_response()
+            {
+                Ok(resp) => resp.into_response(),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to build response",
+                )
+                    .into_response(),
+            }
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
@@ -172,12 +249,18 @@ async fn serve_embedded_fallback(uri: Uri, method: Method) -> Response {
     match EmbeddedStatic::get(p) {
         Some(f) => {
             let mime = mime_for_path(p);
-            Response::builder()
+            match Response::builder()
                 .status(StatusCode::OK)
                 .header(http_header::CONTENT_TYPE, mime)
                 .body(Body::from(f.data.into_owned()))
-                .unwrap()
-                .into_response()
+            {
+                Ok(resp) => resp.into_response(),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to build response",
+                )
+                    .into_response(),
+            }
         }
         None => match EmbeddedStatic::get("index.html") {
             Some(f) => {
@@ -480,10 +563,11 @@ async fn get_credential(State(state): State<AppState>, Path(id): Path<i64>) -> R
     crud::get_credential(&state.db, id).map(Json).ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Credential not found"))
 }
 
-async fn create_credential(State(state): State<AppState>, Json(data): Json<CredentialCreate>) -> Result<Json<CredentialRead>, Response> {
+async fn create_credential(State(state): State<AppState>, Json(mut data): Json<CredentialCreate>) -> Result<Json<CredentialRead>, Response> {
     if crud::get_project(&state.db, data.project_id).is_none() {
         return Err(api_err(StatusCode::NOT_FOUND, "Project not found"));
     }
+    validate_credential_create(&mut data)?;
     let kind_owned = data
         .kind
         .clone()
@@ -496,13 +580,16 @@ async fn create_credential(State(state): State<AppState>, Json(data): Json<Crede
             "Invalid credential kind. Use: ssh, password, vault, git.",
         ));
     }
-    let mut data = data;
     data.kind = Some(kind_owned);
     let enc = secrets::encrypt_secret(&data.secret);
     crud::create_credential(&state.db, &data, &enc).map(Json).map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create credential"))
 }
 
 async fn update_credential(State(state): State<AppState>, Path(id): Path<i64>, Json(mut data): Json<CredentialUpdate>) -> Result<Json<CredentialRead>, Response> {
+    validate_credential_update(&data)?;
+    if let Some(ref mut n) = data.name {
+        *n = n.trim().to_string();
+    }
     if let Some(ref k) = data.kind {
         let t = k.trim();
         if !credential_kind_ok(t) {

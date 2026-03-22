@@ -1,7 +1,7 @@
 # Code quality & security review (rust-ansible-ui)
 
 **Scope:** `src-tauri` server (`ansible-server`), static UI, deploy scripts.  
-**Last updated:** 2026-03-17
+**Last updated:** 2026-03-17 (credential field limits)
 
 ---
 
@@ -35,6 +35,8 @@
 - **Playbook listing:** `playbook_discovery::PlaybookListError` distinguishes missing project vs I/O instead of string-matching errors.
 - **Deploy pubkey:** `ansible_user` from credential Extra is restricted to safe characters; IPs validated as IPv4; max 32 hosts per request; duplicate identical `authorized_keys` lines skipped (`grep -qxF` on remote).
 - **Public key from credential:** Derived with the **`ssh-key`** crate (OpenSSH PEM) first, then `ssh-keygen -y` fallback; avoids many host `libcrypto` / OpenSSL mismatches when reading keys from the DB.
+- **Credential API:** Create/update reject empty names, enforce max **256** chars for name, **16 KiB** for `extra`, **512 KiB** for plaintext `secret` (abuse / DB bloat mitigation).
+- **Embedded static responses:** HTTP response build failures return 500 instead of panicking on `unwrap()`.
 
 ### Frontend
 
