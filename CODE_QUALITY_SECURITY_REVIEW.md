@@ -16,6 +16,7 @@
 | **Stored secrets** | **Medium** (expected) | Credentials encrypted at rest (AES-256-GCM) with key from env / keyfile / auto-generated file. **Back up the key**; protect DB + key file permissions (`ansible-ui` user, `0o600`). |
 | **Arbitrary command execution** | **Medium** (by design) | Job templates run `ansible-playbook` or whitelisted script interpreters on paths resolved under allowed roots. A malicious operator with API access can run arbitrary playbooks/scripts the service user can execute—treat API access as **root-equivalent** on managed hosts. |
 | **Git SSH** | **Medium** | `StrictHostKeyChecking=accept-new` eases first connect but allows trust-on-first-use MITM until host key is pinned. Prefer known_hosts management for strict environments. |
+| **SSH Key Deployer** | **High** if API exposed | `POST .../generate_keypair` returns a **private key** in JSON (same trust model as API: no auth). `POST .../deploy_pubkey` runs `ssh`/`sshpass` to append keys on selected hosts using stored credentials — powerful; keep API on loopback or trusted LAN. Deploy uses `StrictHostKeyChecking=accept-new` (same TOFU caveat as Git). **Unix/Linux/macOS server only** for deploy; password path needs `sshpass`. |
 | **SSRF / internal network** | **Medium** | Inventories and playbooks can target internal IPs; Ansible runs as service user. This is normal for Ansible; restrict who can edit data and network egress if needed. |
 
 ### Defensive measures already in place
@@ -32,6 +33,7 @@
 - **`POST /api/ssh_deployer/scan`:** global `tokio::sync::Semaphore(1)` so only **one ICMP scan runs at a time** (extra requests wait in queue instead of multiplying process load).
 - **`POST /api/ssh_deployer/public_key`:** JSON must include **`project_id`**; server checks the project exists and the credential belongs to that project. Wrong project returns **404** with the same message as a missing credential to reduce ID enumeration.
 - **Playbook listing:** `playbook_discovery::PlaybookListError` distinguishes missing project vs I/O instead of string-matching errors.
+- **Deploy pubkey:** `ansible_user` from credential Extra is restricted to safe characters; IPs validated as IPv4; max 32 hosts per request; duplicate identical `authorized_keys` lines skipped (`grep -qxF` on remote).
 
 ### Frontend
 

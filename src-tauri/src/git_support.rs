@@ -224,16 +224,33 @@ pub fn list_playbooks_in_repo(repo_path: &Path) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut playbooks = Vec::new();
 
-    for entry in walkdir::WalkDir::new(repo_path)
+    // Canonical base so strip_prefix matches WalkDir paths (esp. Windows).
+    let base = repo_path.canonicalize().unwrap_or_else(|_| repo_path.to_path_buf());
+
+    /// Only inspect path segments *inside* the repo. Using the full absolute path wrongly skips
+    /// the entire tree when the clone lives under a parent like `...\.cursor\...` or `...\.vscode\...`.
+    fn entry_ok(base: &Path, e: &walkdir::DirEntry) -> bool {
+        let Ok(rel) = e.path().strip_prefix(base) else {
+            return false;
+        };
+        let skip_dot = rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.')
+        });
+        let name = e.file_name().to_string_lossy();
+        !skip_dot && name != "group_vars" && name != "host_vars"
+    }
+
+    for entry in walkdir::WalkDir::new(&base)
         .into_iter()
-        .filter_entry(|e| !e.path().components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')) && e.file_name().to_string_lossy() != "group_vars" && e.file_name().to_string_lossy() != "host_vars")
+        .filter_entry(|e| entry_ok(&base, e))
         .filter_map(Result::ok)
     {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        let rel = match path.strip_prefix(repo_path) {
+        let rel = match path.strip_prefix(&base) {
             Ok(r) => r,
             Err(_) => continue,
         };

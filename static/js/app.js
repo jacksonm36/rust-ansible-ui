@@ -32,8 +32,15 @@ let credentials = [];
 let jobTemplates = [];
 let jobs = [];
 
-/** SSH Key Deployer: last scan CIDR + results */
-let sshDeployerState = { cidr: '192.168.1.0/24', hosts: [] };
+/** SSH Key Deployer: scan results + checkbox selection (survives re-render; see skip refresh on this page). */
+let sshDeployerState = {
+  cidr: '192.168.1.0/24',
+  hosts: [],
+  /** @type {Record<string, true>} */
+  selectedIps: {},
+  /** Public key line(s) to deploy / paste (kept across re-renders). */
+  deployPubkeyText: '',
+};
 
 const REFRESH_INTERVAL_MS = 4000;
 let refreshIntervalId = null;
@@ -52,6 +59,8 @@ function startRefresh() {
   refreshIntervalId = setInterval(async () => {
     if (refreshBusy) return;
     if (jobPollIntervalId) return; // Job modal already polls aggressively
+    // SSH Key Deployer: periodic re-render was clearing checkbox state; this page uses local selection state.
+    if (currentPage === 'ssh-deployer') return;
     refreshBusy = true;
     try {
       await loadForPage(currentPage);
@@ -134,6 +143,8 @@ function runAction(action, id, el) {
   if (action === 'ssh-select-none') { sshSelectReachable(false); return; }
   if (action === 'ssh-show-pubkey') { showSshPublicKeyModal().catch(showError); return; }
   if (action === 'ssh-add-inventory') { addScannedHostsToInventory(); return; }
+  if (action === 'ssh-generate-keys') { sshGenerateKeypair().catch(showError); return; }
+  if (action === 'ssh-deploy-keys') { sshDeployPubkeys().catch(showError); return; }
 }
 
 function renderDashboard() {
@@ -183,66 +194,113 @@ function yamlInventoryFromIps(ips) {
 }
 
 function renderSshDeployer() {
-  const { cidr, hosts } = sshDeployerState;
+  const { cidr, hosts, selectedIps, deployPubkeyText } = sshDeployerState;
+  const sel = selectedIps || {};
   const projectOpts = projects.length
     ? projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
     : '<option value="">No projects</option>';
-  const credOpts = credentials.filter(c => c.kind === 'ssh').map(c =>
-    `<option value="${c.id}" data-project-id="${c.project_id}">${escapeHtml(c.name)} (project ${c.project_id})</option>`).join('');
+  const credOptsSsh = credentials.filter(c => c.kind === 'ssh').map(c =>
+    `<option value="${c.id}" data-project-id="${c.project_id}">${escapeHtml(c.name)} (SSH key, project ${c.project_id})</option>`).join('');
+  const credOptsDeploy = credentials.filter(c => c.kind === 'ssh' || c.kind === 'password').map(c =>
+    `<option value="${c.id}" data-project-id="${c.project_id}">${escapeHtml(c.name)} (${escapeHtml(c.kind)}, project ${c.project_id})</option>`).join('');
   const rows = hosts.length
-    ? hosts.map(h => `
+    ? hosts.map(h => {
+        const checked = sel[h.ip] ? 'checked' : '';
+        return `
       <tr>
-        <td><input type="checkbox" class="ssh-host-cb" data-ip="${escapeHtml(h.ip)}"></td>
+        <td><input type="checkbox" class="ssh-host-cb" data-ip="${escapeHtml(h.ip)}" ${checked}></td>
         <td><code>${escapeHtml(h.ip)}</code></td>
         <td>${h.alive ? '<span class="badge badge-success">reachable</span>' : '<span class="badge badge-pending">no reply</span>'}</td>
-      </tr>`).join('')
-    : '<tr><td colspan="3" class="empty-state">Run a scan to list addresses (ICMP from the server). Max 1024 hosts per scan.</td></tr>';
+      </tr>`;
+      }).join('')
+    : '<tr><td colspan="3" class="empty-state">Run a scan. Up to 1024 addresses; ICMP and/or TCP (22, 80, …) from the <strong>server</strong> process.</td></tr>';
+  const pkBody = deployPubkeyText != null && deployPubkeyText !== undefined ? escapeHtml(deployPubkeyText) : '';
   return `
+  <div id="ssh-deployer-root">
     <h1 class="page-title">SSH Key Deployer</h1>
-    <p class="text-muted">Discover hosts on your LAN from <strong>this server</strong>, add them to an inventory, then use an SSH credential + job template to run Ansible (e.g. <code>authorized_key</code>) or paste your public key manually.</p>
+    <p class="text-muted">Scan and deploy run on the <strong>Ansible server</strong> (not your browser). <strong>Deploy</strong> works only when that server is <strong>Linux or macOS</strong> (not Windows). Password login deploy requires <code>sshpass</code> installed on the server. Select hosts, paste or generate a <strong>public</strong> key, then append to <code>~/.ssh/authorized_keys</code> (identical lines are skipped — safe to re-run).</p>
+
     <div class="card">
-      <div class="card-header">Network scan</div>
-      <div style="padding:1rem;">
-        <div class="form-group">
-          <label>IPv4 CIDR</label>
-          <input type="text" id="ssh-cidr" value="${escapeHtml(cidr)}" placeholder="192.168.1.0/24" style="max-width:320px;">
+      <div class="card-header">1. Discover hosts</div>
+      <div class="card-body ssh-card-body">
+        <div class="form-row">
+          <div class="form-group" style="flex:0 1 280px">
+            <label>IPv4 CIDR</label>
+            <input type="text" id="ssh-cidr" value="${escapeHtml(cidr)}" placeholder="192.168.1.0/24">
+          </div>
+          <div class="form-group ssh-scan-actions">
+            <label class="invisible">.</label>
+            <button type="button" class="btn btn-primary" data-action="ssh-scan">Scan network</button>
+          </div>
         </div>
-        <button type="button" class="btn btn-primary" data-action="ssh-scan">Scan network</button>
-        <span class="text-muted" style="margin-left:12px;">Uses OS <code>ping</code>. Many hosts block ICMP; unreachable ≠ down.</span>
+        <p class="text-muted ssh-help">Ping/TCP run as the service user; use <strong>ansible_user</strong> in credential Extra for deploy (default <code>root</code>).</p>
       </div>
     </div>
+
     <div class="card">
-      <div class="card-header">Scan results</div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th style="width:44px"></th><th>Address</th><th>ICMP</th></tr></thead>
+      <div class="card-header">2. Scan results — tick hosts, then inventory or deploy</div>
+      <div class="table-wrap ssh-scan-table-wrap">
+        <table class="ssh-scan-table">
+          <thead><tr><th style="width:44px" title="Selection is kept when you scroll; this page does not auto-refresh."></th><th>Address</th><th>Reachable</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
-      <div style="padding:0.75rem 1rem;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      <div class="ssh-scan-footer">
         <button type="button" class="btn btn-sm btn-secondary" data-action="ssh-select-reachable">Select reachable</button>
-        <button type="button" class="btn btn-sm btn-secondary" data-action="ssh-select-none">Clear</button>
-        <span style="flex:1"></span>
+        <button type="button" class="btn btn-sm btn-secondary" data-action="ssh-select-none">Clear selection</button>
+        <span class="flex-spacer"></span>
         <label class="text-muted">Project</label>
-        <select id="ssh-inv-project">${projectOpts}</select>
-        <button type="button" class="btn btn-sm btn-primary" data-action="ssh-add-inventory">Add selected to inventory…</button>
+        <select id="ssh-inv-project" class="ssh-select-compact">${projectOpts}</select>
+        <button type="button" class="btn btn-sm btn-primary" data-action="ssh-add-inventory">Add selected → inventory</button>
       </div>
     </div>
+
     <div class="card">
-      <div class="card-header">SSH public key (from credential)</div>
-      <div style="padding:1rem;">
-        <p class="text-muted">Derives the public line with <code>ssh-keygen -y</code> on the server (OpenSSH required).</p>
+      <div class="card-header">3. Key pair &amp; deploy</div>
+      <div class="card-body ssh-card-body">
+        <div class="form-row ssh-key-row">
+          <button type="button" class="btn btn-secondary" data-action="ssh-generate-keys">Generate new Ed25519 key pair</button>
+          <span class="text-muted">Runs <code>ssh-keygen</code> on the server. Copy the <strong>private</strong> key into <strong>Credentials</strong> if you want to keep it.</span>
+        </div>
+        <div class="form-group">
+          <label>Public key line to install on selected hosts</label>
+          <textarea id="ssh-deploy-pubkey" class="ssh-pubkey-ta" placeholder="ssh-ed25519 AAAA… or generate above">${pkBody}</textarea>
+        </div>
+        <div class="form-row ssh-deploy-row">
+          <div class="form-group" style="flex:0 1 200px">
+            <label>Project</label>
+            <select id="ssh-deploy-project">${projectOpts}</select>
+          </div>
+          <div class="form-group" style="flex:1 1 260px">
+            <label>Login credential (SSH key or password)</label>
+            <select id="ssh-deploy-cred"><option value="">— Select —</option>${credOptsDeploy || '<option value="" disabled>No SSH/password credentials</option>'}</select>
+          </div>
+          <div class="form-group ssh-deploy-btn-wrap">
+            <label class="invisible">.</label>
+            <button type="button" class="btn btn-primary" data-action="ssh-deploy-keys">Deploy public key to selected hosts</button>
+          </div>
+        </div>
+        <p class="text-muted ssh-help">Max 32 hosts per run. Uses <code>ssh</code> to add one line to <code>~/.ssh/authorized_keys</code> only if that exact line is not already present. Password auth requires <code>sshpass</code> on the server.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">4. Public key from existing credential</div>
+      <div class="card-body ssh-card-body">
         <div class="form-group">
           <label>SSH private key credential</label>
-          <select id="ssh-cred"><option value="">— Select —</option>${credOpts || '<option value="" disabled>No SSH credentials</option>'}</select>
+          <select id="ssh-cred"><option value="">— Select —</option>${credOptsSsh || '<option value="" disabled>No SSH credentials</option>'}</select>
         </div>
         <button type="button" class="btn btn-secondary" data-action="ssh-show-pubkey">Show public key &amp; tips</button>
       </div>
     </div>
+  </div>
   `;
 }
 
 async function runSshScan() {
+  const taPub = qs('#ssh-deploy-pubkey');
+  if (taPub) sshDeployerState.deployPubkeyText = taPub.value;
   const input = qs('#ssh-cidr');
   const cidr = input ? input.value.trim() : '';
   if (!cidr) { alert('Enter an IPv4 CIDR (e.g. 192.168.1.0/24).'); return; }
@@ -250,7 +308,16 @@ async function runSshScan() {
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
   try {
     const data = await fetchJSON(`${API}/ssh_deployer/scan`, { method: 'POST', body: JSON.stringify({ cidr }) });
-    sshDeployerState = { cidr, hosts: data.hosts || [] };
+    const newHosts = data.hosts || [];
+    const prevSel = sshDeployerState.selectedIps || {};
+    const nextSel = {};
+    newHosts.forEach(h => { if (prevSel[h.ip]) nextSel[h.ip] = true; });
+    sshDeployerState = {
+      cidr,
+      hosts: newHosts,
+      selectedIps: nextSel,
+      deployPubkeyText: sshDeployerState.deployPubkeyText || '',
+    };
     render();
   } catch (e) {
     showError(e);
@@ -261,23 +328,85 @@ async function runSshScan() {
 }
 
 function sshSelectReachable(onlyAlive) {
-  const alive = new Set((sshDeployerState.hosts || []).filter(h => h.alive).map(h => h.ip));
-  qsAll('.ssh-host-cb').forEach(cb => {
-    const ip = cb.dataset.ip;
-    if (onlyAlive) cb.checked = alive.has(ip);
-    else cb.checked = false;
-  });
+  const taPub = qs('#ssh-deploy-pubkey');
+  if (taPub) sshDeployerState.deployPubkeyText = taPub.value;
+  if (!sshDeployerState.selectedIps) sshDeployerState.selectedIps = {};
+  if (!onlyAlive) {
+    sshDeployerState.selectedIps = {};
+  } else {
+    const next = {};
+    (sshDeployerState.hosts || []).filter(h => h.alive).forEach(h => { next[h.ip] = true; });
+    sshDeployerState.selectedIps = next;
+  }
+  render();
 }
 
 function addScannedHostsToInventory() {
-  const selected = [...qsAll('.ssh-host-cb:checked')].map(cb => cb.dataset.ip).filter(Boolean);
-  if (!selected.length) { alert('Select at least one host.'); return; }
+  const taPub = qs('#ssh-deploy-pubkey');
+  if (taPub) sshDeployerState.deployPubkeyText = taPub.value;
+  const selected = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
+    (sshDeployerState.hosts || []).some(h => h.ip === ip)
+  );
+  if (!selected.length) { alert('Select at least one host in the table (checkboxes).'); return; }
   const sel = qs('#ssh-inv-project');
   const project_id = sel ? parseInt(sel.value, 10) : NaN;
   if (!project_id) { alert('Choose a project.'); return; }
   const content = yamlInventoryFromIps(selected);
   const suggestName = `scanned-${new Date().toISOString().slice(0, 10)}`;
   openInventoryModal(null, { project_id, content, suggestName });
+}
+
+async function sshGenerateKeypair() {
+  const taPub = qs('#ssh-deploy-pubkey');
+  if (taPub) sshDeployerState.deployPubkeyText = taPub.value;
+  const data = await fetchJSON(`${API}/ssh_deployer/generate_keypair`, { method: 'POST', body: '{}' });
+  const pub = data.public_key || '';
+  const priv = data.private_key_openssh || '';
+  sshDeployerState.deployPubkeyText = pub;
+  render();
+  showModal(
+    'Generated Ed25519 key pair',
+    `<p style="color:var(--failed);font-size:0.9rem">Anyone with this page can see the private key until you close the dialog. Copy it to a credential, then close.</p>
+     <p class="text-muted">The <strong>public</strong> line is also in &quot;Public key to install&quot; below.</p>
+     <label>Private key (copy once, then store securely)</label>
+     <textarea readonly class="ssh-pubkey-ta" style="min-height:140px">${escapeHtml(priv)}</textarea>
+     <label>Public key</label>
+     <textarea readonly class="ssh-pubkey-ta">${escapeHtml(pub)}</textarea>`,
+    '<button class="btn btn-secondary" data-action="close-modal">Close</button>'
+  );
+}
+
+async function sshDeployPubkeys() {
+  const ta = qs('#ssh-deploy-pubkey');
+  if (ta) sshDeployerState.deployPubkeyText = ta.value;
+  const public_key = (ta && ta.value ? ta.value : sshDeployerState.deployPubkeyText || '').trim();
+  if (!public_key) { alert('Paste or generate a public key first.'); return; }
+  const proj = qs('#ssh-deploy-project');
+  const credEl = qs('#ssh-deploy-cred');
+  const project_id = proj ? parseInt(proj.value, 10) : 0;
+  const credential_id = credEl && credEl.value ? parseInt(credEl.value, 10) : 0;
+  const opt = credEl && credEl.selectedOptions && credEl.selectedOptions[0];
+  const credProject = opt && opt.dataset.projectId ? parseInt(opt.dataset.projectId, 10) : 0;
+  if (!project_id || !credential_id) { alert('Select project and login credential.'); return; }
+  if (credProject !== project_id) { alert('The credential must belong to the selected project.'); return; }
+  const ips = Object.keys(sshDeployerState.selectedIps || {}).filter(ip =>
+    (sshDeployerState.hosts || []).some(h => h.ip === ip)
+  );
+  if (!ips.length) { alert('Select at least one host in the scan table.'); return; }
+  if (ips.length > 32) { alert('Maximum 32 hosts per deploy. Narrow your selection.'); return; }
+  if (!confirm(`Append this public key to ~/.ssh/authorized_keys on ${ips.length} host(s) as user from credential (ansible_user / default root)? Identical lines are skipped.`)) return;
+  const data = await fetchJSON(`${API}/ssh_deployer/deploy_pubkey`, {
+    method: 'POST',
+    body: JSON.stringify({ project_id, credential_id, ips, public_key }),
+  });
+  const rows = (data.results || []).map(r =>
+    `<tr><td><code>${escapeHtml(r.ip)}</code></td><td>${r.ok ? '<span class="badge badge-success">ok</span>' : '<span class="badge badge-failed">fail</span>'}</td><td>${escapeHtml(r.detail)}</td></tr>`
+  ).join('');
+  showModal(
+    'Deploy results',
+    `<div class="table-wrap"><table class="ssh-result-table"><thead><tr><th>Host</th><th></th><th>Detail</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+    '<button class="btn btn-secondary" data-action="close-modal">Close</button>'
+  );
 }
 
 async function showSshPublicKeyModal() {
@@ -821,6 +950,7 @@ async function openTemplateModal(id) {
         <label>Playbook or script path</label>
         <select id="modal-playbook-select"><option value="">— Loading… —</option></select>
         <input type="text" id="modal-playbook-custom" placeholder="Custom path (e.g. subdir/site.yml or script.sh)" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;">
+        <p class="text-muted" id="modal-playbook-hint" style="margin:0.35rem 0 0;font-size:0.85rem;"></p>
         <small class="text-muted">Lists files from the project workspace after <strong>Pull</strong>, plus paths under the server working directory. Pick <em>Custom path…</em> to type any path.</small>
       </div>
       <div class="form-group">
@@ -990,6 +1120,12 @@ async function openTemplateModal(id) {
       }
       html += '<option value="__custom__">Custom path…</option>';
       sel.innerHTML = html;
+      const hint = qs('#modal-playbook-hint');
+      if (hint) {
+        hint.textContent = (!ws.length && !cwdList.length)
+          ? 'No playbooks found yet. Click Pull on the project (if using Git), or use Custom path… (path is relative to the clone root or server working directory).'
+          : '';
+      }
       const allPaths = [...ws, ...cwdList];
       if (savedPath && allPaths.includes(savedPath)) sel.value = savedPath;
       else if (savedPath) {
@@ -1002,6 +1138,8 @@ async function openTemplateModal(id) {
       }
     } catch (e) {
       console.error(e);
+      const hintErr = qs('#modal-playbook-hint');
+      if (hintErr) hintErr.textContent = 'Could not load playbook list (check network / API). Use Custom path… below.';
       sel.innerHTML = '<option value="">— Could not list playbooks —</option><option value="__custom__">Custom path…</option>';
       if (savedPath) {
         sel.value = '__custom__';
@@ -1228,6 +1366,22 @@ async function reloadAndRender() {
   await loadForPage(currentPage);
   render();
 }
+
+// SSH Key Deployer: keep checkbox + textarea state in sshDeployerState (not only in DOM).
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (currentPage !== 'ssh-deployer' || !t.classList || !t.classList.contains('ssh-host-cb')) return;
+  const ip = t.dataset.ip;
+  if (!ip) return;
+  if (!sshDeployerState.selectedIps) sshDeployerState.selectedIps = {};
+  if (t.checked) sshDeployerState.selectedIps[ip] = true;
+  else delete sshDeployerState.selectedIps[ip];
+});
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'ssh-deploy-pubkey') {
+    sshDeployerState.deployPubkeyText = e.target.value;
+  }
+});
 
 // Init: nav + load data + render + auto-refresh
 qsAll('.sidebar-nav a').forEach(a => {

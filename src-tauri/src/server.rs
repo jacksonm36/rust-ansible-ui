@@ -379,6 +379,61 @@ async fn ssh_deployer_public_key(
     Ok(Json(SshPubKeyResponse { public_key }))
 }
 
+#[derive(serde::Serialize)]
+struct GenerateKeypairResponse {
+    public_key: String,
+    private_key_openssh: String,
+}
+
+async fn ssh_deployer_generate_keypair() -> Result<Json<GenerateKeypairResponse>, Response> {
+    let (public_key, private_key_openssh) =
+        tokio::task::spawn_blocking(ssh_deployer::generate_ed25519_keypair)
+            .await
+            .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
+            .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+    Ok(Json(GenerateKeypairResponse {
+        public_key,
+        private_key_openssh,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct DeployPubkeyBody {
+    project_id: i64,
+    credential_id: i64,
+    ips: Vec<String>,
+    public_key: String,
+}
+
+#[derive(serde::Serialize)]
+struct DeployPubkeyResponse {
+    results: Vec<ssh_deployer::DeployKeyResult>,
+}
+
+async fn ssh_deployer_deploy_pubkey(
+    State(state): State<AppState>,
+    Json(body): Json<DeployPubkeyBody>,
+) -> Result<Json<DeployPubkeyResponse>, Response> {
+    if body.ips.len() > 32 {
+        return Err(api_err(
+            StatusCode::BAD_REQUEST,
+            "Too many ips in request (max 32 per deploy).",
+        ));
+    }
+    let db = state.db.clone();
+    let project_id = body.project_id;
+    let credential_id = body.credential_id;
+    let ips = body.ips;
+    let public_key = body.public_key;
+    let results = tokio::task::spawn_blocking(move || {
+        ssh_deployer::deploy_public_key_to_hosts(&db, project_id, credential_id, ips, &public_key)
+    })
+    .await
+    .map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))?
+    .map_err(|e| api_err(StatusCode::BAD_REQUEST, &e))?;
+    Ok(Json(DeployPubkeyResponse { results }))
+}
+
 // --- Inventories ---
 async fn list_inventories(State(state): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Vec<InventoryRead>> {
     let project_id = q.get("project_id").and_then(|s| s.parse().ok());
@@ -608,7 +663,7 @@ fn resolve_playbook_and_creds(
                 ssh_key.as_deref(),
                 https_token.as_deref(),
             )?;
-            let candidate = repo_path.join(playbook_path.trim_start_matches(|c| c == '/' || c == '\\'));
+            let candidate = repo_path.join(playbook_path.trim_start_matches(['/', '\\']));
             let candidate = candidate.canonicalize().map_err(|e| e.to_string())?;
             let repo_abs = repo_path.canonicalize().map_err(|e| e.to_string())?;
             if !candidate.starts_with(repo_abs) {
@@ -789,6 +844,11 @@ fn api_routes(state: AppState) -> Router<AppState> {
         .route("/projects/:id", get(get_project).patch(update_project).delete(delete_project))
         .route("/ssh_deployer/scan", post(ssh_deployer_scan))
         .route("/ssh_deployer/public_key", post(ssh_deployer_public_key))
+        .route(
+            "/ssh_deployer/generate_keypair",
+            post(ssh_deployer_generate_keypair),
+        )
+        .route("/ssh_deployer/deploy_pubkey", post(ssh_deployer_deploy_pubkey))
         .route("/inventories", get(list_inventories).post(create_inventory))
         .route("/inventories/:id", get(get_inventory).patch(update_inventory).delete(delete_inventory))
         .route("/credentials", get(list_credentials).post(create_credential))

@@ -468,3 +468,74 @@ input:focus, textarea:focus {
   font-size: 0.85rem;
   color: var(--text-muted);
 }
+
+/* SSH Key Deployer */
+#ssh-deployer-root .card-body.ssh-card-body,
+.ssh-card-body {
+  padding: 1rem;
+}
+#ssh-deployer-root .form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+#ssh-deployer-root .invisible {
+  opacity: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.ssh-scan-footer {
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+}
+.flex-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+.ssh-pubkey-ta {
+  width: 100%;
+  min-height: 72px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+}
+.ssh-scan-table-wrap {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin: 0 1rem 0;
+}
+.ssh-scan-table {
+  margin: 0;
+}
+.ssh-help {
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+  color: var(--text-muted);
+}
+.ssh-key-row,
+.ssh-deploy-row {
+  align-items: flex-end;
+}
+.ssh-deploy-btn-wrap {
+  flex: 0 0 auto;
+}
+.ssh-result-table {
+  width: 100%;
+  font-size: 0.9rem;
+}
+.ssh-result-table td:last-child {
+  word-break: break-word;
+}
